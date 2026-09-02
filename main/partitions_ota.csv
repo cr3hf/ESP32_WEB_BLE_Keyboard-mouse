@@ -1,0 +1,9 @@
+# 自定义分区表：支持 OTA 双分区（4MB flash）
+# 固件约 1.32MB，ota_0/ota_1 各给 0x190000(1.5MB) 留余量
+# nvs/phy_init 偏移与大小保持与原 single_app_large 一致，已烧录设备的配置可保留
+# name,     type, subtype,  offset,   size
+nvs,      data, nvs,     0x9000,   0x6000
+phy_init, data, phy,     0xf000,   0x1000
+ota_0,    app,  ota_0,   0x10000,  0x190000
+ota_1,    app,  ota_1,   ,         0x190000
+otadata,  data, ota,     ,         0x2000

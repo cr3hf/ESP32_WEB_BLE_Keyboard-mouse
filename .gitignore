@@ -1,0 +1,105 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Directory metadata
+.directory
+
+# Temporary files
+*~
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# Log files
+*.log
+
+# Build artifacts and directories
+**/build/
+build/
+*.o
+*.a
+*.out
+*.exe # For any host-side utilities compiled on Windows
+
+# ESP-IDF specific build outputs
+*.bin
+*.elf
+*.map
+flasher_args.json # Generated in build directory
+sdkconfig.old
+sdkconfig
+
+# ESP-IDF dependencies
+# For older versions or manual component management
+/components/.idf/
+**/components/.idf/
+# For modern ESP-IDF component manager
+managed_components/
+# If ESP-IDF tools are installed/referenced locally to the project
+.espressif/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+
+# Python environment files
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.egg-info/
+dist/
+
+# Virtual environment folders
+venv/
+.venv/
+env/
+
+# Language Servers
+.clangd/
+.ccls-cache/
+compile_commands.json
+
+# Windows specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# User-specific configuration files
+*.user
+*.workspace # General workspace files, can be from various tools
+*.suo       # Visual Studio Solution User Options
+*.sln.docstates # Visual Studio
+
+.org/
+.plan/
+.codebuddy/
+.devcontainer/
+.vscode/
+.vscode-server/
+
+# 本地私有配置（含个人信息 / 默认凭据，不提交到公开仓库）
+main/local_defs.h
+
+# 个人配置导出（可能含 WiFi 凭据，不提交）
+carinekb-config-*.json
+
+# 开发脚本 / 笔记（含本地绝对路径与项目名 CarineKB，不提交到公开仓库）
+edit_web*.py
+check_js.py
+plan.md
+
+# clangd 语言服务器缓存（本地自动生成，含绝对路径，不提交）
+.cache/
+
+# 开发产物（由 edit_web*.py 从固件提取的 JS 镜像，非构建必需）
+_extracted.js
+
+# 本地硬件测试脚本（非固件构建必需，不提交到公开仓库）
+pytest_blink.py
