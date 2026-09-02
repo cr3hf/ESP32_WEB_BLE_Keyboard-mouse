@@ -41,7 +41,7 @@ extern "C" {
  * 跨所有动作）”的限制——逻辑光标坐标 s_cur 永远落在此范围内。
  * 以屏幕中心为原点：x ∈ [-MOUSE_POS_LIMIT_X, +MOUSE_POS_LIMIT_X]
  *                    y ∈ [-MOUSE_POS_LIMIT_Y, +MOUSE_POS_LIMIT_Y]
- * 默认：水平 ±350，垂直 ±150（基准值，未折算缩放）。取值偏小可避免动作内
+ * 默认：水平 ±400，垂直 ±200（基准值，未折算缩放）。取值偏小可避免动作内
  * 光标跳动幅度过大显得“夸张”。实际生效的是折算后的 MOUSE_POS_EFF_X / MOUSE_POS_EFF_Y。
  */
 #ifndef MOUSE_POS_LIMIT_X
@@ -65,8 +65,8 @@ extern "C" {
  *
  * 可选值（见 action_engine.c 中 mouse_corner_t）：
  *   CORNER_TOP_RIGHT / CORNER_TOP_LEFT / CORNER_BOTTOM_RIGHT / CORNER_BOTTOM_LEFT
- * 默认撞左上角（适用于副屏在左侧的多屏布局，如左 3440x1440 副屏），
- * 单屏或副屏在右侧时改为 CORNER_TOP_RIGHT，按需修改。
+ * 默认撞右上角（CORNER_TOP_RIGHT），适用于单屏或副屏在右侧；
+ * 副屏在左侧时改为 CORNER_TOP_LEFT，副屏在下/上时对应 CORNER_BOTTOM_RIGHT / CORNER_BOTTOM_LEFT，按需修改。
  */
 #ifndef MOUSE_HOME_CORNER
 #define MOUSE_HOME_CORNER   CORNER_TOP_RIGHT
@@ -105,7 +105,7 @@ extern "C" {
 #define ACT_W_WORD     0   /* 打字（随机单词） */
 #define ACT_W_ALT_TAB  0   /* 切换程序（Alt+Tab），默认禁用 */
 
-/* ---------------- 动作1：拖拽 参数（动作说明.txt §1） ----------------
+/* ---------------- 动作1：拖拽 参数（动作说明.md §1） ----------------
  * 注：当前动作采用"随机目标点 + 受限步进移动"实现，下面 DIST/STEP 距离类宏
  *     已不再被动作代码直接引用（保留以备后续改回角度/距离式移动）。
  */
@@ -120,7 +120,7 @@ extern "C" {
 #define DRAG_END_DELAY_MIN  500     /* ms：动作结束延迟下限 */
 #define DRAG_END_DELAY_MAX  5000    /* ms：动作结束延迟上限 */
 
-/* ---------------- 动作2：点击 参数（动作说明.txt §2） ---------------- */
+/* ---------------- 动作2：点击 参数（动作说明.md §2） ---------------- */
 #define CLICK_DIST_MIN      10
 #define CLICK_DIST_MAX      100
 #define CLICK_STEP_MIN      1
@@ -134,7 +134,7 @@ extern "C" {
 #define CLICK_HOLD_MIN      20      /* ms：左键按下保持时长下限 */
 #define CLICK_HOLD_MAX      250     /* ms：左键按下保持时长上限 */
 
-/* ---------------- 动作3：滚轮 参数（动作说明.txt §3） ---------------- */
+/* ---------------- 动作3：滚轮 参数（动作说明.md §3） ---------------- */
 #define WHEEL_STEP_MIN      1
 #define WHEEL_STEP_MAX      30
 #define WHEEL_REPEAT_MIN    1
@@ -146,7 +146,7 @@ extern "C" {
 #define WHEEL_END_DELAY_MIN 1000     /* ms */
 #define WHEEL_END_DELAY_MAX 5000    /* ms */
 
-/* ---------------- 动作4：方向键 参数（动作说明.txt §4） ---------------- */
+/* ---------------- 动作4：方向键 参数（动作说明.md §4） ---------------- */
 #define ARROW_REPEAT_MIN    1
 #define ARROW_REPEAT_MAX    20
 #define ARROW_INTERVAL_MIN  50      /* ms */
@@ -154,7 +154,7 @@ extern "C" {
 #define ARROW_END_DELAY_MIN 1000     /* ms */
 #define ARROW_END_DELAY_MAX 5000    /* ms */
 
-/* ---------------- 动作5：休息 参数（动作说明.txt §5） ---------------- */
+/* ---------------- 动作5：休息 参数（动作说明.md §5） ---------------- */
 #define REST_DELAY_MIN      1000    /* ms */
 #define REST_DELAY_MAX      20000   /* ms */
 
