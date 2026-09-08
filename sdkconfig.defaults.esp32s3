@@ -11,7 +11,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=n
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 CONFIG_PARTITION_TABLE_SINGLE_APP=n
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=n
-CONFIG_PARTITION_TABLE_TYPE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="main/partitions_ota.csv"
 
 # ---------------- PSRAM（Quad 模式通吃 N4R2 / N16R8） ----------------
@@ -61,3 +61,13 @@ CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_N3=y
 # ---------------- 编译优化 ----------------
 # 优化固件体积
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# ---------------- LWIP（跨网段/端口映射访问可靠性） ----------------
+# 默认 TCP MSS=1440。经 NAT/端口映射回传 65KB 单页时，若外网路径 MTU<1440(常见 PPPoE/隧道/手机热点)，
+# 大段被丢弃且 PMTUD 被 NAT 屏蔽 → 对端收不到 → 响应 RST(ECONNRESET)，表现为外部能连上但页面发不回来。
+# 降到 536(RFC 最小安全值，兼容任何路径 MTU>=576) 彻底规避该问题；代价是外网吞吐略降，本地/AP 直连无感。
+CONFIG_LWIP_TCP_MSS=536
+# HTTP 服务内部固定占 3 个 socket，max_open_sockets 上限 = LWIP_MAX_SOCKETS - 3。
+# web_server.c 当前用 max_open_sockets=7(默认 LWIP_MAX_SOCKETS=10 → 上限 7，用户 4 路)，增量编译即可通过。
+# 若执行 Full Clean 重新生成 sdkconfig，本行 LWIP_MAX_SOCKETS=16 生效 → 上限 13，届时可把 max_open_sockets 提到 9(用户 6 路)。
+CONFIG_LWIP_MAX_SOCKETS=16

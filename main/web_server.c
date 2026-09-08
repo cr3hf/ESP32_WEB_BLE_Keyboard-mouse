@@ -1128,26 +1128,12 @@ static esp_err_t handler_root(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    httpd_resp_set_hdr(req, "Transfer-Encoding", "chunked");
-
-    const char *p = PAGE_HTML;
-    size_t total = strlen(PAGE_HTML);
-    const size_t CHUNK = 1024;
-    size_t off = 0;
-    while (off < total) {
-        size_t len = total - off;
-        if (len > CHUNK) len = CHUNK;
-        esp_err_t r = httpd_resp_send_chunk(req, p + off, len);
-        if (r != ESP_OK) {
-            if (r != ESP_ERR_HTTPD_RESP_SEND) {  /* 客户端断开静默，不刷屏 */
-                ESP_LOGW(TAG, "页面分块发送中断 @%u/%u: %s", off, total, esp_err_to_name(r));
-            }
-            return r;
-        }
-        off += len;
-    }
-    /* 发送空块结束 chunked 传输 */
-    return httpd_resp_send_chunk(req, NULL, 0);
+    /* 用 Content-Length 一次性发送（非 chunked）：
+     * 部分手机浏览器(如小米自带浏览器)对 chunked 大响应兼容性差，会在接收中途 RST 连接
+     * (日志 send:104 / uri handler execution failed)；Content-Length 响应所有客户端均可
+     * 可靠接收。httpd 内部会按 send_wait_timeout 在发送缓冲满时等待可写，确保 65KB 整页送达。
+     * 配合 CONFIG_LWIP_TCP_MSS=536 兼容经 NAT/端口映射的小 MTU 外网路径。 */
+    return httpd_resp_send(req, PAGE_HTML, strlen(PAGE_HTML));
 }
 
 /* ---------------- /api/login ----------------
@@ -2153,13 +2139,18 @@ esp_err_t web_server_start(void)
     /* 限制并发连接数：系统常态空闲 heap 仅约 22KB，每个 httpd 任务占一份栈 + JSON 缓冲，
      * 多开网页(多标签并发 GET)会让并发任务峰值击穿 heap → BLE_INIT Malloc failed / wifi:m f null。
      * 限制为 4（仍允许 1 个浏览器多标签 + 1 个手机同时访问），其余连接排队或拒绝，保护 heap。 */
-    config.max_open_sockets = 4;    /* httpd 上限为 7（内部占 3 个，最多 1 个用户并发连接） */
-    config.stack_size = 8192;       /* POST /api/config 需 cJSON_Parse 解析含 200 词 word_list 的大 JSON，
-                                        峰值栈 >4KB，4KB 会栈溢出导致保存配置时 panic 重启；8KB 留足余量。
-                                        原 12KB 过浪费（多开网页时每连接 12KB 栈是 heap 击穿主因之一），8KB 兼顾安全与 heap。 */
+    /* httpd 是单任务模型：某连接 recv/send 阻塞时整个服务任务被占住、无法接受新连接。
+     * recv_wait_timeout 必须小，否则客户端“连上却静默”(手机熄屏/切网/端口映射异常/RST 未及时处理)
+     * 会占着槽位达该值秒数；多个此类连接凑满槽位即彻底堵死(表现：多开几次网页就再也打不开)。
+     * 设为 5s 让死连接快速释放。 */
+    config.max_open_sockets = 7;    /* 默认 LWIP_MAX_SOCKETS=10 → 上限 7(内部占3，用户4)；增量编译即可通过启动校验。
+                                        若 Full Clean 使 sdkconfig.defaults.esp32s3 的 LWIP_MAX_SOCKETS=16 生效(上限13)，可提到 9(用户6)。 */
+    config.lru_purge_enable = true; /* 达上限时回收最久未用的空闲长连接，避免浏览器并行连接被拒(EMFILE) */
+    config.stack_size = 8192;       /* POST /api/config 需 cJSON_Parse 解析大 JSON，峰值栈>4KB；8KB 留足余量。
+                                       注意：stack_size 是服务任务“单一”栈(所有连接共享)，不会随 max_open_sockets 倍增。 */
     config.task_priority = 5;       /* 与动作引擎同级，避免被 BLE(6) 长期抢占导致响应排队 */
-    config.recv_wait_timeout = 60;  /* OTA 上传固件(约1.25MB)需较长时间，放宽到 60s */
-    config.send_wait_timeout = 10;  /* 保守值：给足发送窗口，避免中途 EAGAIN 丢连接 */
+    config.recv_wait_timeout = 5;   /* 关键：死连接 5s 即释放，避免服务任务被静默客户端长时间卡死 */
+    config.send_wait_timeout = 5;   /* 同步收紧；OTA 上传按 1KB 分块读取，5s/块窗口充足 */
 
     httpd_uri_t uris[] = {
         { .uri = "/",            .method = HTTP_GET,  .handler = handler_root,       .user_ctx = NULL },
