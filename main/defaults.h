@@ -44,9 +44,15 @@
 #define DEF_STA_PASS   ""
 #endif
 
-/* 页面标题 / 品牌（页面中所有 "Carine" 文案统一引用此宏） */
+/* 页面标题 / 品牌 */
 #ifndef APP_TITLE
 #define APP_TITLE          "BLE_KM"
+#endif
+
+/* 导出配置文件名前缀：页面“导出”按钮下载文件名为 <前缀>-<时间戳>.json。
+ * 仅改前面的“ble_km-config”部分，后面 -时间戳.json 由页面自动追加。 */
+#ifndef EXPORT_FILE_PREFIX
+#define EXPORT_FILE_PREFIX  "ble_km-config"
 #endif
 
 /* 蓝牙 HID 广播设备名（Windows 添加设备列表中显示的名称） */

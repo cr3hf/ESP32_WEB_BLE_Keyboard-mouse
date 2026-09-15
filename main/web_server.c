@@ -832,7 +832,7 @@ static const char PAGE_HTML[] =
 "  const url=URL.createObjectURL(blob);\n"
 "  const a=document.createElement('a');\n"
 "  const ts=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);\n"
-"  a.href=url;a.download='ble_km-config-'+ts+'.json';\n"
+"  a.href=url;a.download='" EXPORT_FILE_PREFIX "'+'-'+ts+'.json';\n"
 "  document.body.appendChild(a);a.click();a.remove();\n"
 "  URL.revokeObjectURL(url);\n"
 "  toast('已导出全部参数(JSON)');\n"
