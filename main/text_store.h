@@ -60,6 +60,12 @@ size_t text_store_len(void);
  */
 bool text_store_is_ready(void);
 
+/**
+ * @brief 文本版本号：每次加载/保存成功自增，供 HTTP ETag 条件缓存使用。
+ *        文本未变化时前端凭 ETag 命中 304，避免每次刷新重传整段长文本。
+ */
+unsigned text_store_version(void);
+
 #ifdef __cplusplus
 }
 #endif

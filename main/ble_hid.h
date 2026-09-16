@@ -134,7 +134,9 @@ esp_err_t ble_hid_send_key_mods(uint8_t keycode, uint8_t modifier, bool pressed)
 /**
  * @brief 发送一串 ASCII 文本（逐字符转 HID keycode，自动处理 Shift 大写/符号）
  *
- * 支持 a-z A-Z 0-9 及常见符号（空格 _ - . / : ; 等）。不支持的字符会被跳过。
+ * 支持标准美式键盘可打印 ASCII（0x20~0x7E）：a-z A-Z 0-9 及全部符号，
+ * 含 Shift 组合的 ! @ # $ % & * ( ) _ + { } | : " ~ < > ? 等。
+ * 非美式键盘可输入的字符（如中文）会被跳过。
  * 每个字符以“按下→松开”发送；结束后所有按键均松开。延迟由调用方控制。
  *
  * @param str 以 '\\0' 结尾的 C 字符串

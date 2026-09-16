@@ -29,6 +29,7 @@
 #include "defaults.h"
 #include "ble_hid.h"
 #include "text_store.h"
+#include "page_html_gz.h"   /* 构建期生成的页面 gzip 资源（gen_page_gz.py） */
 
 static const char *TAG = "WEB_SRV";
 
@@ -165,8 +166,9 @@ static const char PAGE_HTML[] =
 "  min-height:100vh;padding-bottom:40px;\n"
 "}\n"
 ".wrap{max-width:1080px;margin:0 auto;padding:18px}\n"
-"/* 鉴权完成前隐藏主内容，避免先闪一下参数页再跳登录 */\n"
-".preauth .wrap,.preauth footer{visibility:hidden}\n"
+"/* 鉴权前隐藏主内容，避免先闪参数页再跳登录；无 token 时直接显示登录框（不依赖脚本） */\n"
+".preauth .wrap,.preauth footer,.noauth .wrap,.noauth footer{visibility:hidden}\n"
+".noauth #login-mask{display:flex !important}\n"
 ".topbar{\n"
 "  position:sticky;top:0;z-index:20;display:flex;flex-direction:column;gap:8px;\n"
 "  padding:10px 20px;border-radius:18px;\n"
@@ -319,8 +321,34 @@ static const char PAGE_HTML[] =
 "</head>\n"
 "<body>\n"
 "<script>\n"
-"document.documentElement.classList.add('preauth');\n"
-"setTimeout(function(){if(document.documentElement.classList.contains('preauth')){var m=document.getElementById('login-mask');if(m)m.classList.remove('hidden');}},6000);\n"
+"/* 鉴权分流 + 自包含登录：不依赖页面底部大脚本，弱网下页面被截断/脚本未执行也能登录。\n"
+"   无 token 直接标记 noauth（登录框随 HTML 解析立即显示）；有 token 先隐藏内容待校验。 */\n"
+"(function(){\n"
+"var de=document.documentElement,KEY='ble_km_token';\n"
+"function getTok(){try{return localStorage.getItem(KEY)||'';}catch(e){return '';}}\n"
+"function setTok(v){try{localStorage.setItem(KEY,v);}catch(e){}}\n"
+"if(getTok()){de.classList.add('preauth');}else{de.classList.add('noauth');}\n"
+"setTimeout(function(){if(de.classList.contains('preauth')){de.classList.remove('preauth');de.classList.add('noauth');}},5000);\n"
+"function setMsg(s,cls){var m=document.getElementById('li-msg');if(m){m.textContent=s;m.className='login-msg'+(cls||'');}}\n"
+"function showPage(){de.classList.remove('preauth');de.classList.remove('noauth');\n"
+"  var m=document.getElementById('login-mask');if(m)m.classList.add('hidden');\n"
+"  var w=document.querySelector('.wrap');if(w)w.style.visibility='visible';\n"
+"  var f=document.querySelector('footer');if(f)f.style.visibility='visible';}\n"
+"function doLogin(){var u=document.getElementById('li-user'),p=document.getElementById('li-pass');if(!u||!p)return;\n"
+"  setMsg('登录中…','');\n"
+"  var ctl=new AbortController();var to=setTimeout(function(){ctl.abort();},15000);\n"
+"  fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:u.value.trim(),pass:p.value}),signal:ctl.signal})\n"
+"   .then(function(r){return r.json().catch(function(){return {};});})\n"
+"   .then(function(j){clearTimeout(to);if(j&&j.ok&&j.token){setTok(j.token);setMsg('登录成功',' ok');showPage();\n"
+"      if(window.__afterLogin){try{window.__afterLogin();}catch(e){console.error(e);}}else{location.reload();}}\n"
+"    else{setMsg((j&&j.msg)||'登录失败',' err');}})\n"
+"   .catch(function(){clearTimeout(to);setMsg('网络错误或超时，请重试',' err');});}\n"
+"document.addEventListener('click',function(e){var el=e.target;\n"
+"  while(el&&el!==document){if(el.id==='li-btn'){e.preventDefault();doLogin();return;}el=el.parentNode;}},true);\n"
+"document.addEventListener('keydown',function(e){if(e.key!=='Enter')return;var id=e.target&&e.target.id;\n"
+"  if(id==='li-pass'){e.preventDefault();doLogin();}\n"
+"  else if(id==='li-user'){e.preventDefault();var p=document.getElementById('li-pass');if(p)p.focus();}},true);\n"
+"})();\n"
 "</script>\n"
 "<div id=\"login-mask\" class=\"hidden\">\n"
 "  <div class=\"login-card\">\n"
@@ -426,13 +454,14 @@ static const char PAGE_HTML[] =
 "      <textarea id='word-list' rows='6' style='width:100%;margin-top:10px;font-family:monospace;font-size:13px;padding:8px;border:1px solid #ccc;border-radius:6px;resize:vertical'></textarea>\n"
 "      <div style='margin-top:16px;border-top:1px solid rgba(148,163,184,.14);padding-top:14px'>\n"
 "        <h2 style='font-size:15px'>📝 文本输入（写文本）</h2>\n"
-"        <div class='hint'>“写文本”动作会把下面这段文本按字符逐个发送（含标点、空格、回车换行）。每轮随机输出一定数量字符（可在下方「写文本」时间组设置上下限），达到上限即本轮结束、下次接着写；写到文本末尾则下次从头开始。可上传 TXT 文件替换，也可复制/导出。</div>\n"
-"        <textarea id='text-input' rows='6' style='width:100%;margin-top:10px;font-family:monospace;font-size:13px;padding:8px;border:1px solid #ccc;border-radius:6px;resize:vertical'></textarea>\n"
+"        <div class='hint'>“写文本”动作会把下面这段文本按字符逐个发送（含标点、空格、回车换行）。每轮随机输出一定数量字符（可在下方「写文本」时间组设置上下限），达到上限即本轮结束、下次接着写；写到文本末尾则下次从头开始。可上传 TXT 文件替换，也可复制/导出。<br>文本可能很长（最多 128K 字符）：页面会在配置加载完成后<b>自动读取</b>（未显示时可点「加载文本」重试）；编辑/替换后点「保存文本」写入设备。</div>\n"
+"        <textarea id='text-input' rows='6' placeholder='点击此处或点「加载文本」读取设备当前文本…' style='width:100%;margin-top:10px;font-family:monospace;font-size:13px;padding:8px;border:1px solid #ccc;border-radius:6px;resize:vertical'></textarea>\n"
 "        <div style='display:flex;justify-content:space-between;align-items:center;margin-top:6px;flex-wrap:wrap;gap:6px'>\n"
 "          <span id='text-count' style='color:var(--sub);font-size:12.5px'>0 / 131072</span>\n"
 "          <span style='color:var(--sub);font-size:12.5px'>修改后点「保存文本」生效（与其它配置分开保存）</span>\n"
 "        </div>\n"
 "        <div style='display:flex;flex-wrap:wrap;gap:8px;margin-top:10px'>\n"
+"          <button class='btn' id='text-load-btn'>加载文本</button>\n"
 "          <button class='btn' id='text-upload-btn'>上传 TXT</button>\n"
 "          <input type='file' id='text-file' accept='.txt,text/plain' style='display:none'>\n"
 "          <button class='btn' id='text-save-btn'>保存文本</button>\n"
@@ -549,6 +578,7 @@ static const char PAGE_HTML[] =
 "const ACT_NAMES=['拖拽','点击','滚轮','方向键','休息','滑动','打字','切换程序','写文本'];\n"
 "const ACT_KEYS =['drag','click','wheel','arrow','rest','move','word','alt_tab','text'];\n"
 "let cfg=null;\n"
+"let _cfgFailed=false;   /* 配置读取是否失败（用于触发一次自动重载） */\n"
 "/* 安全绑定：元素不存在时跳过，避免单个缺失元素导致整个脚本崩溃（此前 reset-timing 缺失曾中断 loadAll） */\n"
 "/* ev 支持 'onclick'/'click' 等写法，统一规范为 'on'+事件名 作为元素属性赋值 */\n"
 "function on(id,ev,fn){const e=document.getElementById(id);if(!e){console.warn('元素缺失，跳过绑定：'+id);return;}\n"
@@ -560,42 +590,43 @@ static const char PAGE_HTML[] =
 "function getToken(){return localStorage.getItem(TOKEN_KEY)||'';}\n"
 "function setToken(v){localStorage.setItem(TOKEN_KEY,v);}\n"
 "function clearToken(){localStorage.removeItem(TOKEN_KEY);}\n"
-"async function api(path,opt){const ctl=new AbortController();const t=setTimeout(()=>ctl.abort(),4000);\n"  // 4s 超时，避免请求卡死堆积
+"async function api(path,opt){const ctl=new AbortController();const t=setTimeout(()=>ctl.abort(),15000);\n"  // 15s：弱网下配置 JSON 可能较慢，4s 会把响应中途掐断
 "  const tk=getToken();const hdr=tk?{Authorization:'Bearer '+tk}:{};\n"
 "  try{const r=await fetch(path,{...opt,headers:{...hdr,...(opt&&opt.headers)},signal:ctl.signal});\n"
-"    let j=null;try{j=await r.json();}catch(e){j={};}\n"
+"    let j=null,parsed=false;try{j=await r.json();parsed=true;}catch(e){j={};}\n"
 "    if(typeof j!=='object'||j===null) j={};\n"
-"    /* 鉴权由服务器保证：HTTP 200 即代表已登录；若响应体未带 ok 字段则补 ok:true */\n"
-"    if(r.ok && typeof j.ok==='undefined') j.ok=true;\n"
-"    else if(!r.ok && typeof j.ok==='undefined') j.ok=false;\n"
+"    /* HTTP 200 且 JSON 解析成功才算可用；若响应被截断/非 JSON(parsed=false)一律视为失败，\n"
+"       交由调用方重试，避免把“读到一半的响应”当成有效配置而显示成默认/错乱参数。 */\n"
+"    if(parsed){ if(r.ok && typeof j.ok==='undefined') j.ok=true;\n"
+"      else if(!r.ok && typeof j.ok==='undefined') j.ok=false; }\n"
+"    else { j.ok=false; if(!j.msg) j.msg='响应不完整'; }\n"
 "    if(r.status===401){ handleUnauth(); } return j;}\n"
 "  finally{clearTimeout(t);}}\n"
 "function handleUnauth(){ clearToken(); showLogin('登录已失效，请重新登录'); }\n"
-"function showLogin(msg){document.documentElement.classList.add('preauth');\n"
+"function showLogin(msg){const de=document.documentElement;de.classList.remove('preauth');de.classList.add('noauth');\n"
 "  const m=document.getElementById('login-mask');if(m)m.classList.remove('hidden');\n"
 "  if(msg){const e=document.getElementById('li-msg');if(e){e.textContent=msg;e.className='login-msg err';}}\n"
 "  const wrap=document.querySelector('.wrap');if(wrap)wrap.style.visibility='hidden';\n"
 "  const ft=document.querySelector('footer');if(ft)ft.style.visibility='hidden';}\n"
-"function hideLogin(){document.documentElement.classList.remove('preauth');\n"
+"function hideLogin(){const de=document.documentElement;de.classList.remove('preauth');de.classList.remove('noauth');\n"
 "  const m=document.getElementById('login-mask');if(m)m.classList.add('hidden');\n"
 "  const wrap=document.querySelector('.wrap');if(wrap)wrap.style.visibility='visible';\n"
 "  const ft=document.querySelector('footer');if(ft)ft.style.visibility='visible';}\n"
-"async function doLogin(){const u=document.getElementById('li-user').value.trim();\n"
-"  const p=document.getElementById('li-pass').value;const msg=document.getElementById('li-msg');\n"
-"  msg.textContent='登录中…';msg.className='login-msg';\n"
-"  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},\n"
-"    body:JSON.stringify({user:u,pass:p})});\n"
-"  let j={};try{j=await r.json();}catch(e){}\n"
-"  if(j.ok && j.token){ setToken(j.token); msg.textContent='登录成功';msg.className='login-msg ok';\n"
-"    hideLogin(); afterLogin(); }\n"
-"  else { msg.textContent=(j.msg||'登录失败');msg.className='login-msg err'; }}\n"
+"/* 登录提交逻辑已前置到 <body> 顶部的自包含脚本（事件委托），此处不再重复绑定，避免双触发。 */\n"
 "async function loadAll(){\n"
-"  let loaded=false;\n"
-"  for(let i=0;i<3 && !loaded;i++){\n"
-"    try{ cfg=await api('/api/config'); loaded=true; }\n"
-"    catch(e){ if(i<2) await new Promise(r=>setTimeout(r,600)); }\n"
+"  let good=null;\n"
+"  for(let i=0;i<4 && !good;i++){\n"
+"    try{ const c=await api('/api/config');\n"
+"      if(c && c.auth===false){ return; }   /* 未登录：api() 已弹出登录框，直接结束，不渲染默认值 */\n"
+"      /* 只有拿到“看起来完整”的配置才算成功：带 ok:true 且含 profiles/weights/timing。\n"
+"         响应被截断时 parsed=false → ok=false，会在这里被丢弃并重试，避免显示成默认/错乱参数。 */\n"
+"      if(c && c.ok!==false && (c.profiles||c.weights||c.timing)) good=c;\n"
+"    }catch(e){}\n"
+"    if(!good && i<3) await new Promise(r=>setTimeout(r,700));\n"
 "  }\n"
-"  if(!loaded){ toast('配置加载失败，使用默认值');\n"
+"  _cfgFailed=!good;\n"
+"  if(good){ cfg=good; }\n"
+"  else { toast('配置读取失败或响应不完整，已显示默认值（请刷新重试）');\n"
 "    cfg=defaultConfigFull();\n"
 "  }\n"
 "  /* 与设备端“尾部补齐”迁移同理：缺失的新增参数用默认值补上，保证页面不出现 undefined */\n"
@@ -1090,14 +1121,20 @@ static const char PAGE_HTML[] =
 "}\n"
 "/* 状态/实时时间轮询：1s 一次，页面切到后台时暂停，减少对 STA 连接的持续占用 */\n"
 "/* 登录门控：无有效 token 时只显示登录框，不加载配置/状态（查看与配置均受登录保护） */\n"
-"function afterLogin(){ loadAll().catch(e=>console.error('loadAll',e)); loadText(); refreshStatus();\n"
-"  setTimeout(()=>{ if(cfg===null){ const t=document.getElementById('toast'); if(t){t.textContent='页面加载不完整，正在重试…';t.classList.add('show');} location.reload(); } },800); }\n"
+"function afterLogin(){ loadAll().catch(function(e){console.error('loadAll',e);}); refreshStatus();\n"
+"  /* 加载看门狗：放宽到 5s（原 800ms 会早于 loadAll 的 3 次重试触发，导致反复整页重载），\n"
+"     且每个标签页最多自动重载一次，避免弱网下陷入“重载→再重载”循环；文本改为配置加载完成后再拉。 */\n"
+"  setTimeout(()=>{ const lm=document.getElementById('login-mask');\n"
+"    if(lm && !lm.classList.contains('hidden'))return;   /* 已在登录页：无需重载 */\n"
+"    if(cfg!==null && !_cfgFailed)return; const t=document.getElementById('toast');\n"
+"    if(t){t.textContent='页面加载不完整，正在重试…';t.classList.add('show');}\n"
+"    let once=false;try{once=!!sessionStorage.getItem('km_cfg_reload');sessionStorage.setItem('km_cfg_reload','1');}catch(e){once=true;}\n"
+"    if(!once)location.reload(); },5000); }\n"
+"/* 供 <body> 顶部自包含登录脚本在登录成功后回调（揭示页面并加载数据） */\n"
+"window.__afterLogin=function(){hideLogin();afterLogin();};\n"
 "if(!getToken()){ showLogin(); }\n"
 "else { (async()=>{ const s=await api('/api/status');\n"
 "  if(s && s.ok){ hideLogin(); afterLogin(); } else { clearToken(); showLogin('登录已失效，请重新登录'); } })(); }\n"
-"document.getElementById('li-btn').onclick=doLogin;\n"
-"document.getElementById('li-pass').addEventListener('keydown',e=>{ if(e.key==='Enter') doLogin(); });\n"
-"document.getElementById('li-user').addEventListener('keydown',e=>{ if(e.key==='Enter') document.getElementById('li-pass').focus(); });\n"
 "document.getElementById('logout-btn').onclick=async()=>{ await fetch('/api/logout',{method:'POST'}); clearToken(); showLogin('已退出登录'); };\n"
 ""
 "function openAuth(){const m=document.getElementById('auth-mask');if(m)m.classList.remove('hidden');\n"
@@ -1120,25 +1157,36 @@ static const char PAGE_HTML[] =
 "['au-user','au-pass','au-pass2'].forEach(id=>{const el=document.getElementById(id);if(el)el.addEventListener('keydown',e=>{if(e.key==='Enter')doSetAuth();});});\n"
 "const auMask=document.getElementById('auth-mask');if(auMask)auMask.addEventListener('click',e=>{if(e.target.id==='auth-mask')closeAuth();});\n"
 "window.addEventListener('load',()=>{\n"
-"  setTimeout(()=>{ setInterval(()=>{ if(!document.hidden) refreshStatus(); },1000); },1500);\n"
+"  setTimeout(()=>{ setInterval(()=>{ if(!document.hidden) refreshStatus(); },2000); },1500);\n"
 "});\n"
 "/* ===== 写文本：文本加载 / 保存 / 导出 / 上传 / 复制 ===== */\n"
 "const TEXT_MAX=131072;\n"
+"let _textLoaded=false;   /* 是否已从设备读取过文本 */\n"
+"let _textLoading=false;  /* 是否正在读取，避免并发重复下载同一份长文本 */\n"
 "function updateTextCount(){const el=document.getElementById('text-input');const c=document.getElementById('text-count');if(!el||!c)return;\n"
 "  const n=el.value.length;c.textContent=n+' / '+TEXT_MAX;c.style.color=(n>TEXT_MAX)?'#ef4444':'var(--sub)';}\n"
 "async function loadText(){\n"
 "  const el=document.getElementById('text-input');if(!el)return;\n"
+"  if(_textLoading)return;            /* 已有请求在途：直接复用，不再发起第二个 */\n"
+"  _textLoading=true;\n"
+"  const c=document.getElementById('text-count');if(c)c.textContent='加载中…';\n"
 "  try{\n"
 "    const tk=getToken();const hdr=tk?{Authorization:'Bearer '+tk}:{};\n"
 "    const r=await fetch('/api/text',{headers:hdr});\n"
 "    if(r.status===401){handleUnauth();return;}\n"
-"    if(r.ok){el.value=await r.text();updateTextCount();}\n"
+"    if(r.ok){el.value=await r.text();_textLoaded=true;updateTextCount();\n"
+"      if(r.headers && r.headers.get('X-Text-Ready')==='0'){\n"
+"        toast('设备缺少 textdb 文本分区：无法读取/保存文本，请用 idf.py flash 完整烧录（含分区表）');}\n"
+"    }\n"
 "  }catch(e){ /* 读取失败保持为空，用户可上传或粘贴 */ }\n"
+"  finally{_textLoading=false;if(!_textLoaded)updateTextCount();}\n"
 "}\n"
+"function loadTextOnce(){if(_textLoaded||_textLoading)return;loadText();}\n"
 "async function saveText(){\n"
 "  const el=document.getElementById('text-input');if(!el)return;\n"
 "  const s=el.value;\n"
 "  if(s.length>TEXT_MAX){toast('文本超过 '+TEXT_MAX+' 字符，请精简后再保存');return;}\n"
+"  if(!_textLoaded && !confirm('尚未从设备加载当前文本，直接保存会用此内容覆盖设备文本。确定继续？'))return;\n"
 "  const btn=document.getElementById('text-save-btn');if(btn)btn.disabled=true;\n"
 "  try{\n"
 "    const tk=getToken();const hdr={'Content-Type':'text/plain; charset=utf-8'};if(tk)hdr.Authorization='Bearer '+tk;\n"
@@ -1149,6 +1197,8 @@ static const char PAGE_HTML[] =
 "  }catch(e){toast('保存失败：网络错误');}\n"
 "  finally{if(btn)btn.disabled=false;}\n"
 "}\n"
+"on('text-load-btn','onclick',loadTextOnce);\n"
+"on('text-input','focus',loadTextOnce);\n"
 "on('text-save-btn','onclick',saveText);\n"
 "on('text-upload-btn','onclick',()=>{const f=document.getElementById('text-file');if(f)f.click();});\n"
 "on('text-file','onchange',(e)=>{\n"
@@ -1157,7 +1207,7 @@ static const char PAGE_HTML[] =
 "  const reader=new FileReader();\n"
 "  reader.onerror=()=>{toast('读取文件失败');};\n"
 "  reader.onload=()=>{const el=document.getElementById('text-input');if(!el)return;\n"
-"    el.value=reader.result||'';updateTextCount();\n"
+"    el.value=reader.result||'';_textLoaded=true;updateTextCount();\n"
 "    toast('已载入 TXT（'+el.value.length+' 字符），点「保存文本」写入设备');};\n"
 "  reader.readAsText(f,'UTF-8');\n"
 "});\n"
@@ -1180,8 +1230,13 @@ static const char PAGE_HTML[] =
 "  catch(e){el.select();try{document.execCommand('copy');toast('已复制全文');}catch(_){toast('复制失败，请手动选择复制');}}\n"
 "});\n"
 "on('text-clear-btn','onclick',()=>{const el=document.getElementById('text-input');if(!el)return;\n"
-"  if(!confirm('确定清空文本框？（清空后需点「保存文本」才会写入设备）'))return;el.value='';updateTextCount();});\n"
+"  if(!confirm('确定清空文本框？（清空后需点「保存文本」才会写入设备）'))return;el.value='';_textLoaded=true;updateTextCount();});\n"
 "on('text-input','input',updateTextCount);\n"
+"/* 长文本只在“文本卡片滚动进入可视区”时才读取：避免登录后立即传数十 KB，\n"
+"   长时间占住单线程 httpd 导致启停/保存等指令排队等待。 */\n"
+"if('IntersectionObserver' in window){var _tio=new IntersectionObserver(function(es){\n"
+"  for(var _i=0;_i<es.length;_i++){if(es[_i].isIntersecting){loadTextOnce();_tio.disconnect();break;}}},\n"
+"  {rootMargin:'200px'});var _tel=document.getElementById('text-input');if(_tel)_tio.observe(_tel);}\n"
 "</script>\n"
 "</body>\n"
 "</html>\n";
@@ -1200,7 +1255,22 @@ static esp_err_t send_json(httpd_req_t *req, cJSON *root, int http_status)
     }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");  /* 禁止浏览器缓存，避免旧 JS 字段缺失导致保存漏字段 */
-    httpd_resp_set_status(req, http_status == 200 ? "200" : "400");
+    /* 必须回真实状态码：此前把一切非 200 都写成 "400"，导致鉴权失败(401)被前端当成 400，
+     * 前端 `r.status===401` 的“登录已失效”分支永不触发 → 不弹登录框，而是拿失败响应继续渲染，
+     * 表现为“配置参数错误 / 页面不完整”。 */
+    switch (http_status) {
+    case 200: httpd_resp_set_status(req, "200 OK"); break;
+    case 400: httpd_resp_set_status(req, "400 Bad Request"); break;
+    case 401: httpd_resp_set_status(req, "401 Unauthorized"); break;
+    case 404: httpd_resp_set_status(req, "404 Not Found"); break;
+    case 500: httpd_resp_set_status(req, "500 Internal Server Error"); break;
+    default: {
+        char st[16];
+        snprintf(st, sizeof(st), "%d", http_status);
+        httpd_resp_set_status(req, st);
+        break;
+    }
+    }
     esp_err_t r = httpd_resp_send(req, s, strlen(s));
     free(s);
     /* 必须释放已构建的 cJSON 树：此前遗漏 cJSON_Delete(root)，导致每个 /api/status 等
@@ -1218,12 +1288,60 @@ static esp_err_t send_json(httpd_req_t *req, cJSON *root, int http_status)
    这与升级前(参考 .org 版本)完全一致；客户端中途断开(ECONNRESET)属正常现象，静默返回。 */
 static esp_err_t handler_root(httpd_req_t *req)
 {
+    /* 内嵌页面整页约 72KB，弱网（AP 信号差 / BLE-WiFi 共存）下单单页发送就容易触发
+     * httpd sock EAGAIN → send 超时 → uri handler execution failed，导致页面加载失败。
+     * 两手优化：
+     *   1) 若浏览器接受 gzip 且构建期已生成压缩体，则发送 gzip（约 21KB，减小约 3.4 倍）；
+     *   2) ETag 条件缓存：页面未变化时回 304（无正文），刷新秒开；固件升级后 ETag 变化自动重下。 */
+    const esp_app_desc_t *d = esp_app_get_description();
+
+    /* 是否可用 gzip（构建期生成失败时 PAGE_HTML_GZ_LEN==0，自动回退明文） */
+    bool use_gz = false;
+    if (PAGE_HTML_GZ_LEN > 0) {
+        size_t alen = httpd_req_get_hdr_value_len(req, "Accept-Encoding");
+        if (alen > 0 && alen < 128) {
+            char *ab = malloc(alen + 1);
+            if (ab != NULL) {
+                if (httpd_req_get_hdr_value_str(req, "Accept-Encoding", ab, alen + 1) == ESP_OK &&
+                    strstr(ab, "gzip") != NULL) {
+                    use_gz = true;
+                }
+                free(ab);
+            }
+        }
+    }
+
+    char etag[112];
+    snprintf(etag, sizeof(etag), "\"%s-%s-%s\"", d->version, d->time, use_gz ? "gz" : "p");
+
+    size_t hlen = httpd_req_get_hdr_value_len(req, "If-None-Match");
+    if (hlen > 0 && hlen < 128) {
+        char *buf = malloc(hlen + 1);
+        if (buf != NULL) {
+            bool same = (httpd_req_get_hdr_value_str(req, "If-None-Match", buf, hlen + 1) == ESP_OK)
+                        && (strcmp(buf, etag) == 0);
+            free(buf);
+            if (same) {
+                httpd_resp_set_status(req, "304 Not Modified");
+                httpd_resp_set_hdr(req, "ETag", etag);
+                httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+                httpd_resp_set_hdr(req, "Vary", "Accept-Encoding");
+                httpd_resp_send(req, NULL, 0);
+                return ESP_OK;
+            }
+        }
+    }
+
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    /* 用 Content-Length 一次性发送（非 chunked）：
-     * 部分手机浏览器(如小米自带浏览器)对 chunked 大响应兼容性差，会在接收中途 RST 连接
-     * (日志 send:104 / uri handler execution failed)；Content-Length 响应所有客户端均可
-     * 可靠接收。httpd 内部会按 send_wait_timeout 在发送缓冲满时等待可写，确保 65KB 整页送达。
+    httpd_resp_set_hdr(req, "ETag", etag);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_set_hdr(req, "Vary", "Accept-Encoding");
+
+    if (use_gz) {
+        httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+        return httpd_resp_send(req, (const char *)PAGE_HTML_GZ, PAGE_HTML_GZ_LEN);
+    }
+    /* 用 Content-Length 一次性发送（非 chunked），兼容对 chunked 大响应不佳的手机浏览器。
      * 配合 CONFIG_LWIP_TCP_MSS=536 兼容经 NAT/端口映射的小 MTU 外网路径。 */
     return httpd_resp_send(req, PAGE_HTML, strlen(PAGE_HTML));
 }
@@ -1980,9 +2098,36 @@ static esp_err_t handler_text_get(httpd_req_t *req)
 {
     if (!require_auth(req)) return ESP_OK;
     const char *txt = text_store_get();
+    size_t len = strlen(txt);
+
+    /* ETag 条件缓存：长文本可达数十 KB，文本未变化时凭 ETag 回 304，避免每次刷新重传。 */
+    char etag[48];
+    snprintf(etag, sizeof(etag), "\"t%u-%u\"", text_store_version(), (unsigned)len);
+
+    size_t hlen = httpd_req_get_hdr_value_len(req, "If-None-Match");
+    if (hlen > 0 && hlen < 64) {
+        char *buf = malloc(hlen + 1);
+        if (buf != NULL) {
+            bool same = (httpd_req_get_hdr_value_str(req, "If-None-Match", buf, hlen + 1) == ESP_OK)
+                        && (strcmp(buf, etag) == 0);
+            free(buf);
+            if (same) {
+                httpd_resp_set_status(req, "304 Not Modified");
+                httpd_resp_set_hdr(req, "ETag", etag);
+                httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+                httpd_resp_set_hdr(req, "X-Text-Ready", text_store_is_ready() ? "1" : "0");
+                httpd_resp_send(req, NULL, 0);
+                return ESP_OK;
+            }
+        }
+    }
+
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_send(req, txt, strlen(txt));
+    httpd_resp_set_hdr(req, "ETag", etag);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    /* 让前端能区分“文本为空”与“textdb 分区缺失（未就绪）”，便于给出明确提示 */
+    httpd_resp_set_hdr(req, "X-Text-Ready", text_store_is_ready() ? "1" : "0");
+    return httpd_resp_send(req, txt, len);
 }
 
 static esp_err_t handler_text_post(httpd_req_t *req)
@@ -2314,9 +2459,13 @@ esp_err_t web_server_start(void)
     config.lru_purge_enable = true; /* 达上限时回收最久未用的空闲长连接，避免浏览器并行连接被拒(EMFILE) */
     config.stack_size = 8192;       /* POST /api/config 需 cJSON_Parse 解析大 JSON，峰值栈>4KB；8KB 留足余量。
                                        注意：stack_size 是服务任务“单一”栈(所有连接共享)，不会随 max_open_sockets 倍增。 */
-    config.task_priority = 5;       /* 与动作引擎同级，避免被 BLE(6) 长期抢占导致响应排队 */
+    config.task_priority = 6;       /* 提到 6：httpd 单任务串行，优先级太低保导致指令响应排队；
+                                        与 BLE 发送任务同级，高于动作引擎(5)，保证配置/启停更跟手 */
     config.recv_wait_timeout = 5;   /* 关键：死连接 5s 即释放，避免服务任务被静默客户端长时间卡死 */
-    config.send_wait_timeout = 5;   /* 同步收紧；OTA 上传按 1KB 分块读取，5s/块窗口充足 */
+    config.send_wait_timeout = 10;  /* 大响应(如 65KB 页面)在弱网/手机端偶发经不起 5s 卡顿：
+                                     * 放宽到 10s 让 httpd 有更多机会等 socket 可写，减少
+                                     * “httpd_sock_err error in send:11 → uri handler execution failed”
+                                     * 导致页面被中途截断。仅影响极端慢连接，正常请求不受影响。 */
 
     httpd_uri_t uris[] = {
         { .uri = "/",            .method = HTTP_GET,  .handler = handler_root,       .user_ctx = NULL },

@@ -412,8 +412,9 @@ esp_err_t ble_hid_send_key(uint8_t keycode, bool pressed)
 }
 
 /* 字符转 HID keycode 与是否需要 Shift。
- * 支持：a-z A-Z 0-9 空格 _ - . / : ; + = ( ) [ ] { } < > 等常见符号。
- * 返回 false 表示不支持该字符（调用方可选择跳过）。 */
+ * 覆盖标准美式键盘可打印 ASCII（0x20~0x7E）：a-z A-Z 0-9 及全部符号
+ * （含 Shift 组合的 ! @ # $ % & * ( ) _ + { } | : " ~ < > ?）。
+ * 返回 false 表示不支持该字符（非美式键盘可输入的字符，如中文，调用方跳过）。 */
 static bool char_to_hid(char c, uint8_t *keycode, bool *need_shift)
 {
     *need_shift = false;
@@ -422,6 +423,17 @@ static bool char_to_hid(char c, uint8_t *keycode, bool *need_shift)
     if (c >= '0' && c <= '9') { *keycode = 0x1E + (c - '0'); return true; }
     switch (c) {
         case ' ': *keycode = 0x2C; return true;
+        /* 数字行上的 Shift 符号（keycode 与对应数字相同，需 Shift） */
+        case '!': *keycode = 0x1E; *need_shift = true; return true;
+        case '@': *keycode = 0x1F; *need_shift = true; return true;
+        case '#': *keycode = 0x20; *need_shift = true; return true;
+        case '$': *keycode = 0x21; *need_shift = true; return true;
+        case '%': *keycode = 0x22; *need_shift = true; return true;
+        case '^': *keycode = 0x23; *need_shift = true; return true;
+        case '&': *keycode = 0x24; *need_shift = true; return true;
+        case '*': *keycode = 0x25; *need_shift = true; return true;
+        case '(': *keycode = 0x26; *need_shift = true; return true;
+        case ')': *keycode = 0x27; *need_shift = true; return true;
         case '-': *keycode = 0x2D; return true;
         case '_': *keycode = 0x2D; *need_shift = true; return true;
         case '=': *keycode = 0x2E; return true;

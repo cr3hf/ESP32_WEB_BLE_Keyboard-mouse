@@ -26,6 +26,7 @@ static const char *TAG = "TEXT_STORE";
 static const esp_partition_t *s_part = NULL;
 static char  *s_text = NULL;    /* PSRAM 缓冲，容量 TEXT_MAX + 8，始终以 '\0' 结尾 */
 static size_t s_len  = 0;       /* 当前文本字节数（不含 '\0'） */
+static unsigned s_version = 0;  /* 加载/保存成功时自增，供 HTTP ETag 使用 */
 
 /* 4 字节对齐向上取整 */
 static size_t align4(size_t n)
@@ -125,6 +126,7 @@ esp_err_t text_store_init(void)
     s_len = 0;
 
     if (text_flash_read()) {
+        s_version++;
         ESP_LOGI(TAG, "文本加载成功：%u 字节", (unsigned)s_len);
         return ESP_OK;
     }
@@ -139,6 +141,7 @@ esp_err_t text_store_init(void)
     s_len = dlen;
     esp_err_t err = text_flash_write(s_text, s_len);
     if (err == ESP_OK) {
+        s_version++;
         ESP_LOGI(TAG, "分区为空，已写入默认文本：%u 字节", (unsigned)s_len);
     } else {
         ESP_LOGW(TAG, "默认文本写入失败(%s)，仅使用运行内存副本", esp_err_to_name(err));
@@ -171,6 +174,7 @@ esp_err_t text_store_save(const char *text, size_t len)
 
     esp_err_t err = text_flash_write(s_text, s_len);
     if (err == ESP_OK) {
+        s_version++;
         ESP_LOGI(TAG, "文本已保存：%u 字节", (unsigned)s_len);
     }
     return err;
@@ -189,4 +193,9 @@ size_t text_store_len(void)
 bool text_store_is_ready(void)
 {
     return (s_part != NULL) && (s_text != NULL);
+}
+
+unsigned text_store_version(void)
+{
+    return s_version;
 }
