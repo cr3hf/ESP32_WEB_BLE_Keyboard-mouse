@@ -31,6 +31,8 @@ extern "C" {
 
 /* ---------------- 常用按键 HID Usage Code (Keyboard/Keypad Page 0x07) ---------------- */
 #define HID_KEY_TAB          0x2B   /* Tab，配合 Left Alt 实现切换程序(Alt+Tab) */
+#define HID_KEY_END          0x4D   /* End，配合 PageDown 定位到文档末尾（写文本前） */
+#define HID_KEY_PAGE_DOWN    0x4E   /* PageDown，写文本前翻到文档末尾 */
 
 /* ---------------- 修饰键（键盘报文 modifier 字节的 bit 掩码） ---------------- */
 #define HID_MODIFIER_LEFT_SHIFT   0x02
@@ -138,6 +140,20 @@ esp_err_t ble_hid_send_key_mods(uint8_t keycode, uint8_t modifier, bool pressed)
  * @param str 以 '\\0' 结尾的 C 字符串
  */
 esp_err_t ble_hid_send_string(const char *str);
+
+/**
+ * @brief 发送单个字符（逐字符版，供“写文本”动作使用）
+ *
+ * 在 ble_hid_send_string 的基础上补充：
+ *   - '\\n' → Enter (HID 0x28)
+ *   - '\\t' → Tab   (HID 0x2B)
+ *   - 其余复用 char_to_hid（自动处理大写与 Shift 符号）
+ * 每个字符以“按下→松开”同帧（修饰键与 keycode 同帧）发送。
+ *
+ * @param c 待发送字符
+ * @return ESP_OK=已发送；ESP_ERR_NOT_SUPPORTED=该字符不支持（跳过，未发送）
+ */
+esp_err_t ble_hid_send_char(char c);
 
 /**
  * @brief 重置蓝牙配对状态

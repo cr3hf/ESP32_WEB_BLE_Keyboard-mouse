@@ -49,6 +49,7 @@ static void cfg_default_weights(action_weights_t *w)
     w->move    = 50;
     w->word    = 0;
     w->alt_tab = 0;   /* 切换程序：默认禁用，需用户在页面开启 */
+    w->text    = 0;   /* 写文本：默认禁用，需用户在页面开启 */
 }
 
 /* 默认动作时间（取自出厂配置文件） */
@@ -78,8 +79,8 @@ static void cfg_default_timing(action_timing_t *t)
     t->arrow_repeat_min = 1;  t->arrow_repeat_max = 20;
     t->arrow_interval_min = 50; t->arrow_interval_max = 800;
     t->arrow_end_delay_min = 1000; t->arrow_end_delay_max = 5000;
-    /* 休息: REST_DELAY_* */
-    t->rest_delay_min = 1000; t->rest_delay_max = 20000;
+    /* 休息: REST_DELAY_*（单位 ×100ms，故 10/200 = 1s/20s） */
+    t->rest_delay_min = 10;   t->rest_delay_max = 200;
     /* 滑动鼠标: 位移距离 + 分片步进 + 次数 + 间隔 + 结束延迟 */
     t->move_repeat_min = 1;   t->move_repeat_max = 20;
     t->move_distance_min = 10; t->move_distance_max = 30;       /* 单次滑动总位移（逻辑像素） */
@@ -102,6 +103,11 @@ static void cfg_default_timing(action_timing_t *t)
     t->alt_tab_repeat_min = 0;  t->alt_tab_repeat_max = 1;
     t->alt_tab_interval_min = 500; t->alt_tab_interval_max = 1000;
     t->alt_tab_end_delay_min = 700; t->alt_tab_end_delay_max = 1500;
+    /* 写文本: 字符延迟(40~300) + 换行延迟(80~600) + 结束延迟(500~2000) + 每轮字符数(1000~5000) */
+    t->text_char_delay_min = 40;   t->text_char_delay_max = 300;
+    t->text_line_delay_min = 80;   t->text_line_delay_max = 600;
+    t->text_end_delay_min = 500;   t->text_end_delay_max = 2000;
+    t->text_char_limit_min = 1000; t->text_char_limit_max = 5000;
 }
 
 /* 默认运动模式（取自 action_engine.h 原宏默认值） */

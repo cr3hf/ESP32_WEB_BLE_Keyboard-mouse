@@ -104,6 +104,7 @@ extern "C" {
 #define ACT_W_MOVE     50   /* 模拟滑动鼠标 */
 #define ACT_W_WORD     0   /* 打字（随机单词） */
 #define ACT_W_ALT_TAB  0   /* 切换程序（Alt+Tab），默认禁用 */
+#define ACT_W_TEXT     0   /* 写文本（长文本逐字符输出），默认禁用 */
 
 /* ---------------- 动作1：拖拽 参数（动作说明.md §1） ----------------
  * 注：当前动作采用"随机目标点 + 受限步进移动"实现，下面 DIST/STEP 距离类宏
@@ -154,9 +155,10 @@ extern "C" {
 #define ARROW_END_DELAY_MIN 1000     /* ms */
 #define ARROW_END_DELAY_MAX 5000    /* ms */
 
-/* ---------------- 动作5：休息 参数（动作说明.md §5） ---------------- */
-#define REST_DELAY_MIN      1000    /* ms */
-#define REST_DELAY_MAX      20000   /* ms */
+/* ---------------- 动作5：休息 参数（动作说明.md §5） ----------------
+ * 单位 ×100ms（如 60 = 6 秒），故 10/200 = 1s/20s。 */
+#define REST_DELAY_MIN      10      /* 单位 ×100ms */
+#define REST_DELAY_MAX      200     /* 单位 ×100ms */
 
 /* ---------------- 动作8：切换程序（Alt+Tab）参数 ----------------
  * - 切换次数（默认 0~1 次）：0=本次不切换程序，1=切换一次。
@@ -186,6 +188,19 @@ extern "C" {
 #define ALT_TAB_END_DELAY_MAX   60000   /* ms：动作后休息上限（与其他动作结束延迟一致） */
 #endif
 #define ALT_TAB_HOLD_MS         10      /* ms：Tab 按下保持时长（与方向键一致） */
+
+/* ---------------- 动作9：写文本 前置定位参数 ----------------
+ * 每次执行「写文本」前，先连续发送若干个 PageDown、再发送一次 End，
+ * 把目标文档的光标定位到末尾，然后再逐字符追加输出文本。 */
+#ifndef TEXT_PRE_PAGEDOWN_COUNT
+#define TEXT_PRE_PAGEDOWN_COUNT 16      /* 次：前置 PageDown 次数 */
+#endif
+#ifndef TEXT_PRE_KEY_HOLD_MS
+#define TEXT_PRE_KEY_HOLD_MS    10      /* ms：PageDown/End 按下保持时长 */
+#endif
+#ifndef TEXT_PRE_KEY_GAP_MS
+#define TEXT_PRE_KEY_GAP_MS     20      /* ms：每次按键之间的间隔 */
+#endif
 
 /* ---------------- 公共保护延迟：每个动作之后额外追加 ---------------- */
 #define ACTION_GUARD_DELAY_MS   100
@@ -334,6 +349,18 @@ void action_engine_trigger_sequence_once(void);
  *        仅在 action_engine_start_task() 之后调用一次。
  */
 esp_err_t action_engine_start_scheduler(void);
+
+/**
+ * @brief 复位“写文本”动作的续写游标，使下次该动作从头开始。
+ *
+ * 写文本动作在内存中维护一个“上次输出到文本何处”的游标（不持久化）：
+ *   - 每轮随机输出 N 个字符（N 在 text_char_limit_min/max 之间），达到上限即本轮完成，
+ *     游标保留，下次继续从该位置输出；
+ *   - 输出到文本末尾则本轮完成并自动把游标归零，下次从头开始。
+ * 当用户通过 Web 修改/替换了文本内容后，调用本函数把游标归零，
+ * 避免游标指向修改后的越界位置。
+ */
+void action_engine_reset_text_cursor(void);
 
 #ifdef __cplusplus
 }

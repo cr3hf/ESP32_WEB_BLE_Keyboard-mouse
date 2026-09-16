@@ -1,0 +1,1297 @@
+#include <string.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/event_groups.h"
+
+#include "esp_random.h"
+#include "esp_log.h"
+#include "esp_err.h"
+#include "esp_timer.h"
+
+#include "ble_hid.h"
+#include "led_status.h"
+#include "action_engine.h"
+
+static const char *TAG = "ACTION_ENGINE";
+
+#include "config_store.h"
+#include "wifi_manager.h"
+
+#define RUN_BIT        (1 << 0)    
+#define STOP_BIT       (1 << 1)    
+#define DISCONNECT_BIT (1 << 2)    
+
+#include <time.h>
+typedef act_id_t action_id_t;
+
+static EventGroupHandle_t s_action_evt = NULL;
+static bool              s_task_created = false;
+
+static int64_t s_run_deadline_us = 0;
+ 
+static int64_t s_sched_stop_deadline_us = 0;
+ 
+static int32_t s_runtime_minutes = 0;
+ 
+static int32_t s_last_blink_minute = -1;
+
+static void reset_runtime(void);
+ 
+static void log_remaining_time(void);
+ 
+static void led_control_task(void *arg);
+ 
+static void led_notify_blink_once(void);
+ 
+static void exec_action_by_id(uint8_t action_id);
+ 
+static void scheduler_task(void *arg);
+
+static run_mode_t       s_run_mode   = RUN_MODE_RANDOM;
+static action_weights_t s_weights = {                  
+    ACT_W_DRAG, ACT_W_CLICK, ACT_W_WHEEL, ACT_W_ARROW, ACT_W_REST, ACT_W_MOVE, ACT_W_WORD,
+};
+static action_seq_t     s_sequence;                    
+static uint8_t          s_seq_cursor = 0;              
+static uint8_t          s_seq_shuffle[ACT_SEQ_MAX];    
+static uint8_t          s_seq_shuffle_len = 0;         
+static bool             s_seq_once_stop = false;       
+
+static void reset_runtime(void)
+{
+    s_run_deadline_us = 0;
+    s_sched_stop_deadline_us = 0;
+    s_runtime_minutes = 0;
+    s_last_blink_minute = -1;
+}
+
+#define LED_BLINK_ON_MS         80       
+#define LED_FREQ_PER_1MIN_MS    50       
+#define LED_FREQ_MAX_MS         2000     
+#define LED_BLINK_ONCE_MS       200      
+#define LED_BLINK_ONCE_GAP_MS   200      
+static EventGroupHandle_t s_led_evt = NULL;
+#define LED_BLINK_ONCE_BIT  (1 << 0)
+
+static bool     s_prev_synced = false;
+static int64_t  s_timeset_guard_until = 0;    
+#define TIMESET_GUARD_US  (10ULL * 1000 * 1000)    
+
+static int64_t get_remaining_us(void)
+{
+    int64_t now = esp_timer_get_time();
+    int64_t eff = 0;
+    if (s_run_deadline_us != 0 && (eff == 0 || s_run_deadline_us < eff)) {
+        eff = s_run_deadline_us;
+    }
+    if (s_sched_stop_deadline_us != 0 && (eff == 0 || s_sched_stop_deadline_us < eff)) {
+        eff = s_sched_stop_deadline_us;
+    }
+    if (eff == 0) {
+        return 0;
+    }
+    int64_t remain = eff - now;
+    return remain > 0 ? remain : 0;
+}
+
+static void log_remaining_time(void)
+{
+    if ((xEventGroupGetBits(s_action_evt) & RUN_BIT) == 0) {
+        return;
+    }
+    if (s_run_deadline_us == 0 && s_sched_stop_deadline_us == 0) {
+        return;    
+    }
+    int64_t remain_us = get_remaining_us();
+    int32_t remain_min = (int32_t)(remain_us / 1000000LL / 60);
+    int32_t remain_sec = (int32_t)((remain_us / 1000000LL) % 60);
+    ESP_LOGI(TAG, "[SOTQ·SCbtpf] %ld z %ld w",
+             (long)remain_min, (long)remain_sec);
+}
+
+static void led_notify_blink_once(void)
+{
+    if (s_led_evt != NULL) {
+        xEventGroupSetBits(s_led_evt, LED_BLINK_ONCE_BIT);
+    }
+}
+
+static int32_t s_cur_x = 0;
+static int32_t s_cur_y = 0;
+
+static int32_t clamp_x(int32_t x)
+{
+    if (x > MOUSE_POS_EFF_X) return MOUSE_POS_EFF_X;
+    if (x < -MOUSE_POS_EFF_X) return -MOUSE_POS_EFF_X;
+    return x;
+}
+static int32_t clamp_y(int32_t y)
+{
+    if (y > MOUSE_POS_EFF_Y) return MOUSE_POS_EFF_Y;
+    if (y < -MOUSE_POS_EFF_Y) return -MOUSE_POS_EFF_Y;
+    return y;
+}
+
+static int rand_range(int min, int max)
+{
+    if (max <= min) {
+        return min;
+    }
+    uint32_t r = esp_random();
+    return (int)(r % (uint32_t)(max - min + 1)) + min;
+}
+
+static const action_timing_t *ae_timing(void)
+{
+    return &config_store_get()->timing;
+}
+
+static bool action_delay_ms(uint32_t ms)
+{
+    if (ms == 0) {
+        return true;
+    }
+    EventBits_t bits = xEventGroupWaitBits(
+        s_action_evt,
+        STOP_BIT | DISCONNECT_BIT,
+        pdFALSE,             
+        pdFALSE,             
+        pdMS_TO_TICKS(ms));
+    return (bits & (STOP_BIT | DISCONNECT_BIT)) == 0;
+}
+
+static bool mouse_move_relative_chunk(int32_t total_dx, int32_t total_dy, uint8_t chunk, uint32_t step_ms, uint8_t buttons)
+{
+    if (chunk < 1) chunk = 1;
+    if (chunk > 127) chunk = 127;    
+    bool neg_x = total_dx < 0;
+    bool neg_y = total_dy < 0;
+    int32_t rem_x = total_dx < 0 ? -total_dx : total_dx;
+    int32_t rem_y = total_dy < 0 ? -total_dy : total_dy;
+
+    while (rem_x > 0 || rem_y > 0) {
+        int32_t cx = (rem_x > chunk) ? chunk : rem_x;
+        int32_t cy = (rem_y > chunk) ? chunk : rem_y;
+        int8_t dx = (int8_t)(neg_x ? -cx : cx);
+        int8_t dy = (int8_t)(neg_y ? -cy : cy);
+
+        esp_err_t err = ble_hid_send_mouse_full_blocking(dx, dy, 0, buttons);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "DfpaehbR: %s", esp_err_to_name(err));
+        }
+
+        rem_x -= cx;
+        rem_y -= cy;
+
+        if (rem_x > 0 || rem_y > 0) {
+            if (!action_delay_ms(step_ms)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static bool mouse_move_relative(int32_t total_dx, int32_t total_dy, uint32_t step_ms, uint8_t buttons)
+{
+    return mouse_move_relative_chunk(total_dx, total_dy, ACTION_MOVE_CHUNK_MAX, step_ms, buttons);
+}
+
+static bool mouse_move_random(int32_t dist_min, int32_t dist_max,
+                               uint8_t step_min, uint8_t step_max,
+                               uint32_t step_ms, uint8_t buttons)
+{
+    int32_t dist = rand_range(dist_min, dist_max);
+    if (dist <= 0) {
+        return true;
+    }
+     
+    int32_t ang = rand_range(0, 7);
+    static const int32_t dir_x[8] = { 1, 1, 0, -1, -1, -1, 0, 1};
+    static const int32_t dir_y[8] = { 0, 1, 1, 1, 0, -1, -1, -1};
+    int32_t dx = dir_x[ang];
+    int32_t dy = dir_y[ang];
+     
+    int32_t target_x = clamp_x(s_cur_x + dx * dist);
+    int32_t target_y = clamp_y(s_cur_y + dy * dist);
+    int32_t total_dx = target_x - s_cur_x;
+    int32_t total_dy = target_y - s_cur_y;
+    if (total_dx == 0 && total_dy == 0) {
+        return true;    
+    }
+    uint8_t chunk = (uint8_t)rand_range(step_min, step_max);
+    if (chunk < 1) chunk = 1;
+    if (chunk > ACTION_MOVE_CHUNK_MAX) chunk = ACTION_MOVE_CHUNK_MAX;
+    bool ok = mouse_move_relative_chunk(total_dx, total_dy, chunk, step_ms, buttons);
+    if (ok) {
+        s_cur_x = target_x;
+        s_cur_y = target_y;
+    }
+    return ok;
+}
+
+static void mouse_wheel(int8_t delta)
+{
+    if (delta == 0) {
+        return;
+    }
+    int8_t sign = (delta > 0) ? 1 : -1;
+    int8_t rem = (int8_t)(delta > 0 ? delta : -delta);
+    while (rem > 0) {
+         
+        int8_t step = rem;
+        ble_hid_send_mouse_full_blocking(0, 0, (int8_t)(sign * step), 0);
+        rem -= step;
+    }
+}
+
+static void mouse_button(uint8_t buttons)
+{
+    ble_hid_send_mouse_full_blocking(0, 0, 0, buttons);
+}
+
+static void action_release_all(void)
+{
+     
+    ble_hid_send_mouse_full_blocking(0, 0, 0, 0);
+     
+    ble_hid_send_key(HID_KEY_ARROW_UP,    false);
+    ble_hid_send_key(HID_KEY_ARROW_DOWN,  false);
+    ble_hid_send_key(HID_KEY_ARROW_LEFT,  false);
+    ble_hid_send_key(HID_KEY_ARROW_RIGHT, false);
+}
+
+typedef enum {
+    CORNER_TOP_RIGHT = 0,    
+    CORNER_TOP_LEFT,         
+    CORNER_BOTTOM_RIGHT,     
+    CORNER_BOTTOM_LEFT,      
+} mouse_corner_t;
+
+static const struct {
+    int8_t dx;
+    int8_t dy;
+} s_corner_dir[4] = {
+    [CORNER_TOP_RIGHT]    = { 127, -127},
+    [CORNER_TOP_LEFT]     = {-127, -127},
+    [CORNER_BOTTOM_RIGHT] = { 127,  127},
+    [CORNER_BOTTOM_LEFT]  = {-127,  127},
+};
+
+static bool action_mouse_home(void)
+{
+    mouse_corner_t corner = (mouse_corner_t)(MOUSE_HOME_CORNER);
+    if (corner > CORNER_BOTTOM_LEFT) {
+        corner = CORNER_TOP_RIGHT;
+    }
+    int sign_x = (s_corner_dir[corner].dx > 0) ? 1 : -1;
+    int sign_y = (s_corner_dir[corner].dy > 0) ? 1 : -1;
+
+    int32_t push = (int32_t)MOUSE_HOME_PUSH_PX;
+    int32_t back_x = (int32_t)MOUSE_HOME_BACK_X;
+    int32_t back_y = (int32_t)MOUSE_HOME_BACK_Y;
+
+    ESP_LOGI(TAG, "VJ: J=%d sign=(%d,%d) PUSH=%d BACK_X=%d BACK_Y=%d",
+             (int)corner, (int)sign_x, (int)sign_y, (int)push, (int)back_x, (int)back_y);
+
+    if (!mouse_move_relative(sign_x * push, sign_y * push, ACTION_HOME_STEP_MS, 0)) {
+        return false;
+    }
+
+    if (!mouse_move_relative(-sign_x * back_x, -sign_y * back_y, ACTION_MOVE_STEP_MS, 0)) {
+        return false;
+    }
+
+    s_cur_x = 0;
+    s_cur_y = 0;
+    return true;
+}
+
+static void act_drag(void)
+{
+    const action_timing_t *T = ae_timing();
+    int repeat = rand_range(T->drag_repeat_min, T->drag_repeat_max);
+    ESP_LOGI(TAG, "[FY] zr jd=%d p", repeat);
+
+    mouse_button(HID_MOUSE_BTN_LEFT);
+
+    for (int i = 0; i < repeat; i++) {
+         
+        if (!mouse_move_random(T->drag_distance_min, T->drag_distance_max,
+                                T->drag_step_min, T->drag_step_max,
+                                ACTION_MOVE_STEP_MS, HID_MOUSE_BTN_LEFT)) {
+            goto exit_release;
+        }
+        int interval = rand_range(T->drag_interval_min, T->drag_interval_max);
+        if (!action_delay_ms(interval)) {
+            goto exit_release;
+        }
+    }
+
+    mouse_button(0);
+     
+    if (!action_mouse_home()) {
+        goto exit_release;
+    }
+     
+    action_delay_ms(rand_range(T->drag_end_delay_min, T->drag_end_delay_max));
+
+exit_release:
+    action_release_all();
+}
+
+static void act_click(void)
+{
+    const action_timing_t *T = ae_timing();
+    int repeat = rand_range(T->click_repeat_min, T->click_repeat_max);
+    ESP_LOGI(TAG, "[yo] LS NH=%d x", repeat);
+
+    for (int i = 0; i < repeat; i++) {
+         
+        if (!mouse_move_random(T->click_distance_min, T->click_distance_max,
+                               T->click_step_min, T->click_step_max,
+                               ACTION_MOVE_STEP_MS, 0)) {
+            goto exit_release;
+        }
+         
+        mouse_button(HID_MOUSE_BTN_LEFT);
+        if (!action_delay_ms(rand_range(T->click_hold_min, T->click_hold_max))) {
+            goto exit_release;
+        }
+        mouse_button(0);
+        int interval = rand_range(T->click_interval_min, T->click_interval_max);
+        if (!action_delay_ms(interval)) {
+            goto exit_release;
+        }
+    }
+
+    if (!action_mouse_home()) {
+        goto exit_release;
+    }
+    action_delay_ms(rand_range(T->click_end_delay_min, T->click_end_delay_max));
+
+exit_release:
+    action_release_all();
+}
+
+static void act_wheel(void)
+{
+    const action_timing_t *T = ae_timing();
+    int repeat = rand_range(T->wheel_repeat_min, T->wheel_repeat_max);
+    ESP_LOGI(TAG, "[pR] qR(yn+MUQt) mD=%d S", repeat);
+
+    int wheel_sum = 0;
+
+    for (int i = 0; i < repeat; i++) {
+         
+        mouse_move_random(T->wheel_distance_min, T->wheel_distance_max,
+                          T->wheel_step_min, T->wheel_step_max,
+                          ACTION_MOVE_STEP_MS, 0);
+
+        int dir  = (esp_random() & 0x1) ? 1 : -1;
+        int tick = rand_range(T->wheel_tick_min, T->wheel_tick_max);
+        int delta = dir * tick;
+        wheel_sum += delta;
+        mouse_wheel((int8_t)delta);
+
+        if (!action_delay_ms(rand_range(T->wheel_interval_min, T->wheel_interval_max))) {
+            goto exit_release;
+        }
+    }
+
+    if (wheel_sum != 0) {
+        mouse_wheel((int8_t)(-wheel_sum));
+    }
+
+    if (!action_mouse_home()) {
+        goto exit_release;
+    }
+    action_delay_ms(rand_range(T->wheel_end_delay_min, T->wheel_end_delay_max));
+
+exit_release:
+    action_release_all();
+}
+
+static void act_arrow_keys(void)
+{
+    const action_timing_t *T = ae_timing();
+    int repeat = rand_range(T->arrow_repeat_min, T->arrow_repeat_max);
+    ESP_LOGI(TAG, "[fz] hre QV=%d L", repeat);
+
+    const uint8_t arrows[4] = {
+        HID_KEY_ARROW_UP, HID_KEY_ARROW_DOWN,
+        HID_KEY_ARROW_LEFT, HID_KEY_ARROW_RIGHT,
+    };
+
+    for (int i = 0; i < repeat; i++) {
+        uint8_t k = arrows[rand_range(0, 3)];
+        ble_hid_send_key(k, true);
+        if (!action_delay_ms(10)) {
+            goto exit_release;
+        }
+        ble_hid_send_key(k, false);
+        if (!action_delay_ms(rand_range(T->arrow_interval_min, T->arrow_interval_max))) {
+            goto exit_release;
+        }
+    }
+
+    action_delay_ms(rand_range(T->arrow_end_delay_min, T->arrow_end_delay_max));
+
+exit_release:
+    action_release_all();
+}
+
+static void act_word(void)
+{
+    const action_timing_t *T = ae_timing();
+    const config_t *cfg = config_store_get();
+    if (cfg == NULL) {
+        return;
+    }
+    const char *list = cfg->word.list;
+    if (list[0] == '\0') {
+         
+        list = config_store_default_word_list();
+        ESP_LOGW(TAG, "[qr] Ea：oFkAQ，JqFErpuRRC");
+    }
+
+    int word_cnt = 0;
+    bool in_word = false;
+    for (const char *p = list; *p; ++p) {
+        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
+            in_word = false;
+        } else if (!in_word) {
+            in_word = true;
+            word_cnt++;
+        }
+    }
+    if (word_cnt == 0) {
+        ESP_LOGW(TAG, "[RF] Dt：anMLC，TK");
+        return;
+    }
+    ESP_LOGI(TAG, "[ZK] Ml cSUF=%d", word_cnt);
+
+    int repeat = rand_range(T->word_repeat_min, T->word_repeat_max);
+    if (repeat < 1) repeat = 1;
+
+    for (int r = 0; r < repeat; r++) {
+         
+        int pick = rand_range(0, word_cnt - 1);
+        const char *p = list;
+        int idx = 0;
+        in_word = false;
+        const char *wstart = NULL;
+        int wlen = 0;
+        while (*p) {
+            if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
+                if (in_word) {  
+                    if (idx == pick) { wlen = (int)(p - wstart); break; }
+                    in_word = false;
+                }
+            } else {
+                if (!in_word) { in_word = true; wstart = p; if (idx == pick) {   } idx++; }
+                else if (idx - 1 == pick) {   }
+            }
+            p++;
+        }
+         
+        if (wlen == 0 && in_word && idx - 1 == pick) {
+            wlen = (int)(p - wstart);
+        }
+        if (wlen <= 0 || wstart == NULL) {
+            continue;
+        }
+
+        for (int i = 0; i < wlen; i++) {
+            char buf[2] = { wstart[i], '\0' };
+            ble_hid_send_string(buf);
+            if (!action_delay_ms(rand_range(T->word_char_delay_min, T->word_char_delay_max))) {
+                goto exit_release;
+            }
+        }
+         
+        ble_hid_send_string(" ");
+        if (!action_delay_ms(rand_range(T->word_space_delay_min, T->word_space_delay_max))) {
+            goto exit_release;
+        }
+    }
+
+    action_delay_ms(rand_range(T->word_end_delay_min, T->word_end_delay_max));
+
+exit_release:
+    action_release_all();
+}
+static void act_rest(void)
+{
+    const action_timing_t *T = ae_timing();
+    int delay = rand_range(T->rest_delay_min, T->rest_delay_max);
+    ESP_LOGI(TAG, "[ur] nb %d ms", delay);
+    action_delay_ms((uint32_t)delay);
+    action_release_all();
+}
+
+static void act_move(void)
+{
+    const action_timing_t *T = ae_timing();
+    int repeat = rand_range(T->move_repeat_min, T->move_repeat_max);
+    int step   = rand_range(T->move_step_min, T->move_step_max);
+    if (step < 1) step = 1;
+    if (step > 127) step = 127;
+    ESP_LOGI(TAG, "[jr] Fq UG=%d qm=%d", repeat, step);
+
+    for (int i = 0; i < repeat; i++) {
+        int dist = rand_range(T->move_distance_min, T->move_distance_max);
+        if (dist < 1) dist = 1;
+         
+        uint8_t dir = (uint8_t)(esp_random() & 0x7);
+        int32_t dx = 0, dy = 0;
+        switch (dir) {
+        case 0: dx =  dist; break;
+        case 1: dx = -dist; break;
+        case 2: dy = -dist; break;
+        case 3: dy =  dist; break;
+        case 4: dx =  dist; dy = -dist; break;
+        case 5: dx =  dist; dy =  dist; break;
+        case 6: dx = -dist; dy = -dist; break;
+        default:dx = -dist; dy =  dist; break;
+        }
+         
+        int32_t tx = clamp_x(s_cur_x + dx);
+        int32_t ty = clamp_y(s_cur_y + dy);
+        if (tx == s_cur_x && ty == s_cur_y) {
+             
+            int32_t span_x = MOUSE_POS_EFF_X * 2;
+            int32_t span_y = MOUSE_POS_EFF_Y * 2;
+            tx = (int32_t)(esp_random() % (uint32_t)(span_x + 1)) - MOUSE_POS_EFF_X;
+            ty = (int32_t)(esp_random() % (uint32_t)(span_y + 1)) - MOUSE_POS_EFF_Y;
+        }
+         
+        if (!mouse_move_relative_chunk(tx - s_cur_x, ty - s_cur_y, (uint8_t)step, ACTION_MOVE_STEP_MS, 0)) {
+            goto exit_release;
+        }
+        s_cur_x = tx;
+        s_cur_y = ty;
+        int interval = rand_range(T->move_interval_min, T->move_interval_max);
+        if (!action_delay_ms(interval)) {
+            goto exit_release;
+        }
+    }
+
+    if (!action_mouse_home()) {
+        goto exit_release;
+    }
+    action_delay_ms(rand_range(T->move_end_delay_min, T->move_end_delay_max));
+
+exit_release:
+    action_release_all();
+}
+
+static action_id_t pick_action(void)
+{
+    int weights[ACT_COUNT] = {
+        s_weights.drag, s_weights.click, s_weights.wheel,
+        s_weights.arrow, s_weights.rest, s_weights.move, s_weights.word,
+    };
+    int total = 0;
+    for (int i = 0; i < ACT_COUNT; i++) {
+        if (weights[i] < 0) {
+            weights[i] = 0;    
+        }
+        total += weights[i];
+    }
+    if (total <= 0) {
+        return ACT_REST;       
+    }
+    int r = (int)(esp_random() % (uint32_t)total);
+    int acc = 0;
+    for (int i = 0; i < ACT_COUNT; i++) {
+        acc += weights[i];
+        if (r < acc) {
+            return (action_id_t)i;
+        }
+    }
+    return ACT_REST;
+}
+
+static void exec_action_by_id(uint8_t action_id)
+{
+    switch (action_id) {
+    case ACT_DRAG:   act_drag();       break;
+    case ACT_CLICK:  act_click();      break;
+    case ACT_WHEEL:  act_wheel();      break;
+    case ACT_ARROW:  act_arrow_keys(); break;
+    case ACT_REST:   act_rest();       break;
+    case ACT_MOVE:   act_move();       break;
+    case ACT_WORD:   act_word();       break;
+    default:         act_rest();       break;
+    }
+}
+
+static void build_shuffle_order(const action_seq_t *seq)
+{
+    uint8_t tmp[ACT_SEQ_MAX];
+    uint8_t n = (seq->count > ACT_SEQ_MAX) ? ACT_SEQ_MAX : seq->count;
+    for (uint8_t i = 0; i < n; i++) {
+        tmp[i] = seq->actions[i];
+    }
+     
+    for (uint8_t i = n; i > 1; i--) {
+        uint8_t j = (uint8_t)(esp_random() % i);
+        uint8_t t = tmp[i - 1];
+        tmp[i - 1] = tmp[j];
+        tmp[j] = t;
+    }
+    memcpy(s_seq_shuffle, tmp, n);
+    s_seq_shuffle_len = n;
+}
+
+static uint8_t seq_action_at(uint8_t idx)
+{
+    uint8_t n = (s_sequence.count > ACT_SEQ_MAX) ? ACT_SEQ_MAX : s_sequence.count;
+    if (n == 0) {
+        return ACT_REST;
+    }
+    if (idx >= n) {
+        idx = (uint8_t)(idx % n);
+    }
+    if (s_sequence.cycle == CYCLE_SHUFFLE && s_seq_shuffle_len > 0) {
+        return s_seq_shuffle[idx];
+    }
+    return s_sequence.actions[idx];
+}
+
+void action_engine_trigger_sequence_once(void)
+{
+    uint8_t n = (s_sequence.count > ACT_SEQ_MAX) ? ACT_SEQ_MAX : s_sequence.count;
+    if (n == 0) {
+        return;
+    }
+    if (!ble_hid_is_connected()) {
+        ESP_LOGW(TAG, "yEWF：TnhPF，sZ");
+        return;
+    }
+    if (s_sequence.cycle == CYCLE_SHUFFLE) {
+        build_shuffle_order(&s_sequence);
+    }
+    for (uint8_t i = 0; i < n; i++) {
+        if (!ble_hid_is_connected()) {
+            break;    
+        }
+        exec_action_by_id(seq_action_at(i));
+    }
+}
+
+void action_engine_run_single(uint8_t action_id)
+{
+    if (!ble_hid_is_connected()) {
+        ESP_LOGW(TAG, "rHeyv：yVaMH，YD action=%d", action_id);
+        return;
+    }
+    ESP_LOGI(TAG, "[MPzIP] Pp action_id=%d", action_id);
+    exec_action_by_id(action_id);
+}
+
+static void action_engine_task(void *arg)
+{
+    (void)arg;
+
+    ESP_LOGI(TAG, "mKhxuiDHX，mq KEY2 cY...");
+
+    while (1) {
+        EventBits_t bits = xEventGroupWaitBits(
+            s_action_evt,
+            RUN_BIT | STOP_BIT | DISCONNECT_BIT,
+            pdFALSE, pdFALSE, portMAX_DELAY);
+
+        if ((bits & RUN_BIT) == 0) {
+             
+            action_release_all();
+            xEventGroupClearBits(s_action_evt, STOP_BIT | DISCONNECT_BIT);
+            continue;
+        }
+
+        if (s_run_deadline_us != 0 &&
+            esp_timer_get_time() >= s_run_deadline_us) {
+            ESP_LOGI(TAG, ">>> tgcf（%ld Yh）nkf，aDZb <<<",
+                     (long)s_runtime_minutes);
+            reset_runtime();
+            xEventGroupClearBits(s_action_evt, RUN_BIT);
+            xEventGroupSetBits(s_action_evt, STOP_BIT);
+            action_release_all();
+            xEventGroupClearBits(s_action_evt, STOP_BIT | DISCONNECT_BIT);
+            continue;
+        }
+
+        if (!ble_hid_is_connected()) {
+            if (!action_delay_ms(500)) {
+                action_release_all();
+            }
+            continue;
+        }
+
+        if (!action_mouse_home()) {
+            action_release_all();
+            continue;
+        }
+
+        if (s_run_mode == RUN_MODE_SEQUENCE) {
+            uint8_t n = (s_sequence.count > ACT_SEQ_MAX) ? ACT_SEQ_MAX : s_sequence.count;
+            if (n == 0) {
+                exec_action_by_id(ACT_REST);    
+            } else {
+                uint8_t act = seq_action_at(s_seq_cursor);
+                exec_action_by_id(act);
+                s_seq_cursor++;
+                if (s_seq_cursor >= n) {
+                     
+                    s_seq_cursor = 0;
+                    if (s_sequence.cycle == CYCLE_SHUFFLE) {
+                        build_shuffle_order(&s_sequence);
+                    } else if (s_sequence.cycle == CYCLE_ONCE) {
+                         
+                        ESP_LOGI(TAG, ">>> kdSx：ftaFwVz，OqaZ <<<");
+                        s_seq_once_stop = true;
+                        xEventGroupClearBits(s_action_evt, RUN_BIT);
+                        xEventGroupSetBits(s_action_evt, STOP_BIT);
+                        action_release_all();
+                        xEventGroupClearBits(s_action_evt, STOP_BIT | DISCONNECT_BIT);
+                        continue;
+                    }
+                }
+            }
+        } else {
+            action_id_t act = pick_action();
+            exec_action_by_id((uint8_t)act);
+        }
+
+        log_remaining_time();
+
+        if ((xEventGroupGetBits(s_action_evt) & (STOP_BIT | DISCONNECT_BIT)) == 0) {
+            action_delay_ms(ACTION_GUARD_DELAY_MS);
+        }
+    }
+}
+
+#define RUNTIME_TICK_PERIOD_MS   60000
+static void runtime_tick_task(void *arg)
+{
+    (void)arg;
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(RUNTIME_TICK_PERIOD_MS));
+
+        bool running = (s_action_evt != NULL) &&
+                      ((xEventGroupGetBits(s_action_evt) & RUN_BIT) != 0);
+
+        if (running) {
+             
+            if (s_run_deadline_us == 0 && s_sched_stop_deadline_us == 0) {
+                continue;
+            }
+            int64_t remain_us = get_remaining_us();
+            if (remain_us <= 0) {
+                continue;
+            }
+            int32_t remain_min = (int32_t)(remain_us / 1000000LL / 60);
+            int32_t remain_sec = (int32_t)((remain_us / 1000000LL) % 60);
+            ESP_LOGI(TAG, "[wUwemZ] %ld c %ld B",
+                     (long)remain_min, (long)remain_sec);
+            continue;
+        }
+
+        struct tm ti;
+        if (!wifi_manager_get_local_time(&ti)) {
+            continue;    
+        }
+        config_t *cfg = config_store_get();
+        if (cfg == NULL) {
+            continue;
+        }
+        int64_t now = esp_timer_get_time();
+        int64_t day_sec = (int64_t)ti.tm_hour * 3600 + ti.tm_min * 60 + ti.tm_sec;
+        int64_t day_us  = day_sec * 1000000LL;
+        int64_t start_us = 0;    
+        for (uint8_t k = 0; k < cfg->timer_count && k < TIMER_RULE_MAX; k++) {
+            timer_rule_t *sr = &cfg->timers[k];
+            if (!sr->enabled || sr->type != TIMER_START_STOP || sr->ss_action != 0) {
+                continue;
+            }
+            int64_t target_sec = (int64_t)sr->hour * 3600 + sr->minute * 60;
+            int64_t delta_us = (target_sec * 1000000LL) - day_us;
+            if (delta_us <= 0) {
+                delta_us += 24LL * 3600 * 1000000LL;    
+            }
+            int64_t ts = now + delta_us;
+            if (start_us == 0 || ts < start_us) {
+                start_us = ts;
+            }
+        }
+        if (start_us == 0) {
+            continue;    
+        }
+        int64_t remain_us = start_us - now;
+        if (remain_us <= 0) {
+            continue;
+        }
+        int32_t remain_min = (int32_t)(remain_us / 1000000LL / 60);
+        int32_t remain_sec = (int32_t)((remain_us / 1000000LL) % 60);
+        ESP_LOGI(TAG, "[cfZw·jUTH] %ld r %ld K",
+                 (long)remain_min, (long)remain_sec);
+    }
+}
+
+esp_err_t action_engine_start_task(void)
+{
+    if (s_task_created) {
+        return ESP_OK;
+    }
+    s_action_evt = xEventGroupCreate();
+    if (s_action_evt == NULL) {
+        ESP_LOGE(TAG, "EventGroup wmBH");
+        return ESP_ERR_NO_MEM;
+    }
+
+    s_led_evt = xEventGroupCreate();
+    if (s_led_evt == NULL) {
+        ESP_LOGE(TAG, "LED EventGroup ukEl");
+        vEventGroupDelete(s_action_evt);
+        s_action_evt = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
+    BaseType_t ok = xTaskCreate(action_engine_task, "action_engine",
+                                ACTION_TASK_STACK, NULL, ACTION_TASK_PRIORITY, NULL);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "BITXwevwDU");
+        vEventGroupDelete(s_action_evt);
+        s_action_evt = NULL;
+        return ESP_FAIL;
+    }
+
+    BaseType_t ok2 = xTaskCreate(runtime_tick_task, "runtime_tick",
+                                 ACTION_TASK_STACK, NULL,
+                                 ACTION_TASK_PRIORITY - 1, NULL);
+    if (ok2 != pdPASS) {
+        ESP_LOGW(TAG, "vwrJHAxSagWkGu（jERSvNZXW）");
+    }
+
+    BaseType_t ok3 = xTaskCreate(led_control_task, "led_ctrl",
+                                 ACTION_TASK_STACK, NULL,
+                                 ACTION_TASK_PRIORITY - 1, NULL);
+    if (ok3 != pdPASS) {
+        ESP_LOGW(TAG, "LED pKliouQm（HHkZHaX）");
+    }
+
+    s_task_created = true;
+    ESP_LOGI(TAG, "ZfvjfRIor");
+    return ESP_OK;
+}
+
+void action_engine_start(void)
+{
+    if (s_action_evt == NULL) {
+        return;
+    }
+     
+    if (s_run_deadline_us != 0) {
+        ESP_LOGI(TAG, ">>> KEY2 TPV：wEDozbjrAuPfD（yz）<<<");
+        reset_runtime();
+    } else {
+        ESP_LOGI(TAG, ">>> KEY2 Mrc：HYgefG <<<");
+    }
+
+    xEventGroupClearBits(s_action_evt, STOP_BIT | DISCONNECT_BIT);
+    xEventGroupSetBits(s_action_evt, RUN_BIT);
+}
+
+void action_engine_stop(void)
+{
+    if (s_action_evt == NULL) {
+        return;
+    }
+     
+    xEventGroupClearBits(s_action_evt, RUN_BIT);
+    xEventGroupSetBits(s_action_evt, STOP_BIT);
+    reset_runtime();    
+    ESP_LOGI(TAG, ">>> KEY0 kts：aBUfgu <<<");
+
+    struct tm ti;
+    if (wifi_manager_get_local_time(&ti)) {
+        config_t *cfg = config_store_get();
+        if (cfg != NULL) {
+            int64_t now = esp_timer_get_time();
+            int64_t day_sec = (int64_t)ti.tm_hour * 3600 + ti.tm_min * 60 + ti.tm_sec;
+            int64_t day_us  = day_sec * 1000000LL;
+            int64_t start_us = 0;
+            for (uint8_t k = 0; k < cfg->timer_count && k < TIMER_RULE_MAX; k++) {
+                timer_rule_t *sr = &cfg->timers[k];
+                if (!sr->enabled || sr->type != TIMER_START_STOP || sr->ss_action != 0) {
+                    continue;
+                }
+                int64_t target_sec = (int64_t)sr->hour * 3600 + sr->minute * 60;
+                int64_t delta_us = (target_sec * 1000000LL) - day_us;
+                if (delta_us <= 0) {
+                    delta_us += 24LL * 3600 * 1000000LL;
+                }
+                int64_t ts = now + delta_us;
+                if (start_us == 0 || ts < start_us) {
+                    start_us = ts;
+                }
+            }
+            if (start_us != 0) {
+                int64_t remain_us = start_us - now;
+                if (remain_us > 0) {
+                    int32_t remain_min = (int32_t)(remain_us / 1000000LL / 60);
+                    int32_t remain_sec = (int32_t)((remain_us / 1000000LL) % 60);
+                    ESP_LOGI(TAG, "[WUgc] uKdwTADt %ld q %ld Q",
+                             (long)remain_min, (long)remain_sec);
+                }
+            }
+        }
+    }
+}
+
+bool action_engine_is_running(void)
+{
+    if (s_action_evt == NULL) {
+        return false;
+    }
+    return (xEventGroupGetBits(s_action_evt) & RUN_BIT) != 0;
+}
+
+bool action_engine_stop_and_wait(uint32_t timeout_ms)
+{
+    if (s_action_evt == NULL) {
+        return true;
+    }
+    xEventGroupClearBits(s_action_evt, RUN_BIT);
+    xEventGroupSetBits(s_action_evt, STOP_BIT);
+    reset_runtime();    
+
+    EventBits_t bits = xEventGroupWaitBits(
+        s_action_evt, STOP_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
+    return (bits & STOP_BIT) == 0;
+}
+
+void action_engine_stop_and_reset(void)
+{
+    if (s_action_evt == NULL) {
+        return;
+    }
+
+    xEventGroupClearBits(s_action_evt, RUN_BIT);
+    xEventGroupSetBits(s_action_evt, STOP_BIT);
+    reset_runtime();    
+    ESP_LOGI(TAG, ">>> KEY3 bLg：KPlUpVCmPuN <<<");
+
+    xEventGroupWaitBits(
+        s_action_evt, STOP_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(2000));
+
+    if (!ble_hid_is_connected()) {
+        ESP_LOGW(TAG, "whJAI，rBCORHio，xECpzz");
+        return;
+    }
+
+    if (!action_mouse_home()) {
+        ESP_LOGW(TAG, "qKWSLUT（STOP/EV）");
+    } else {
+        ESP_LOGI(TAG, "tPOzufBVHJ，EOuSB");
+    }
+}
+
+static void led_control_task(void *arg)
+{
+    (void)arg;
+    const action_timing_t *T = ae_timing();
+    bool running = false;
+    bool timed   = false;        
+    int64_t remain_us = 0;
+    uint32_t freq_interval_ms = T->led_freq_per_1min_ms;
+
+    while (1) {
+        if (s_action_evt != NULL) {
+            running = (xEventGroupGetBits(s_action_evt) & RUN_BIT) != 0;
+        } else {
+            running = false;
+        }
+        remain_us = get_remaining_us();
+        timed = running && (remain_us > 0);
+
+        if (!running) {
+            led_status_set(false);                   
+             
+            EventBits_t b = xEventGroupWaitBits(s_led_evt, LED_BLINK_ONCE_BIT,
+                                                pdTRUE, pdFALSE, pdMS_TO_TICKS(200));
+            if (b & LED_BLINK_ONCE_BIT) {
+                xEventGroupClearBits(s_led_evt, LED_BLINK_ONCE_BIT);
+                led_status_set(true);
+                vTaskDelay(pdMS_TO_TICKS(T->led_blink_once_ms));
+                led_status_set(false);
+                vTaskDelay(pdMS_TO_TICKS(T->led_blink_once_gap_ms));
+                led_status_set(true);
+                vTaskDelay(pdMS_TO_TICKS(T->led_blink_once_ms));
+                led_status_set(false);
+            }
+            continue;
+        }
+
+        if (!timed) {
+            led_status_set(true);                    
+            xEventGroupWaitBits(s_led_evt, LED_BLINK_ONCE_BIT,
+                                pdTRUE, pdFALSE, pdMS_TO_TICKS(300));
+            if (xEventGroupGetBits(s_led_evt) & LED_BLINK_ONCE_BIT) {
+                xEventGroupClearBits(s_led_evt, LED_BLINK_ONCE_BIT);
+                led_status_set(true);
+                vTaskDelay(pdMS_TO_TICKS(T->led_blink_once_ms));
+                led_status_set(false);
+                vTaskDelay(pdMS_TO_TICKS(T->led_blink_once_gap_ms));
+                led_status_set(true);
+                vTaskDelay(pdMS_TO_TICKS(T->led_blink_once_ms));
+                led_status_set(false);
+            }
+            continue;
+        }
+
+        int32_t remain_min = (int32_t)(remain_us / 1000000LL / 60);
+        freq_interval_ms = (uint32_t)remain_min * T->led_freq_per_1min_ms;   
+        if (freq_interval_ms < T->led_freq_per_1min_ms) {
+            freq_interval_ms = T->led_freq_per_1min_ms;    
+        }
+        if (freq_interval_ms > T->led_freq_max_ms) {
+            freq_interval_ms = T->led_freq_max_ms;         
+        }
+
+        led_status_set(true);                        
+        vTaskDelay(pdMS_TO_TICKS(T->led_blink_on_ms));
+        led_status_set(false);                       
+
+        EventBits_t b = xEventGroupWaitBits(s_led_evt, LED_BLINK_ONCE_BIT,
+                                            pdTRUE, pdFALSE,
+                                            pdMS_TO_TICKS(freq_interval_ms));
+        if (b & LED_BLINK_ONCE_BIT) {
+            xEventGroupClearBits(s_led_evt, LED_BLINK_ONCE_BIT);
+            led_status_set(true);
+            vTaskDelay(pdMS_TO_TICKS(T->led_blink_once_ms));
+            led_status_set(false);
+            vTaskDelay(pdMS_TO_TICKS(T->led_blink_once_gap_ms));
+            led_status_set(true);
+            vTaskDelay(pdMS_TO_TICKS(T->led_blink_once_ms));
+            led_status_set(false);
+        }
+    }
+}
+
+void action_engine_add_runtime(void)
+{
+    if (s_action_evt == NULL) {
+        return;
+    }
+
+    int64_t now = esp_timer_get_time();
+
+    s_runtime_minutes += KEY1_ADD_MINUTES;
+    if (s_run_deadline_us != 0 && s_run_deadline_us > now) {
+        s_run_deadline_us += (int64_t)KEY1_ADD_MINUTES * 60 * 1000000LL;
+    } else {
+        s_run_deadline_us = now + (int64_t)KEY1_ADD_MINUTES * 60 * 1000000LL;
+    }
+
+    if ((xEventGroupGetBits(s_action_evt) & RUN_BIT) == 0) {
+        xEventGroupClearBits(s_action_evt, STOP_BIT | DISCONNECT_BIT);
+        xEventGroupSetBits(s_action_evt, RUN_BIT);
+    }
+
+    ESP_LOGI(TAG, ">>> KEY1 ibV：EIwY +%d cM（fQ %ld XF）<<<",
+             KEY1_ADD_MINUTES, (long)s_runtime_minutes);
+
+    led_notify_blink_once();
+}
+
+void action_engine_apply_config(const config_t *cfg)
+{
+    if (cfg == NULL) {
+        return;
+    }
+    s_run_mode = cfg->run_mode;
+    s_weights  = cfg->weights;
+    memcpy(&s_sequence, &cfg->sequence, sizeof(s_sequence));
+    s_seq_cursor = 0;
+    s_seq_shuffle_len = 0;
+    s_seq_once_stop = false;
+    if (s_sequence.cycle == CYCLE_SHUFFLE && s_sequence.count > 0) {
+        build_shuffle_order(&s_sequence);
+    }
+    ESP_LOGI(TAG, "RfgB：mode=%d seq_count=%d", s_run_mode, s_sequence.count);
+}
+
+void action_engine_set_mode(run_mode_t mode)
+{
+    s_run_mode = (mode == RUN_MODE_SEQUENCE) ? RUN_MODE_SEQUENCE : RUN_MODE_RANDOM;
+    s_seq_cursor = 0;
+    s_seq_shuffle_len = 0;
+    s_seq_once_stop = false;
+    ESP_LOGI(TAG, "bIvMlrx %d", s_run_mode);
+}
+
+void action_engine_set_weights(const action_weights_t *w)
+{
+    if (w == NULL) {
+        return;
+    }
+    s_weights = *w;
+    ESP_LOGI(TAG, "ZJQk：drag=%d click=%d wheel=%d arrow=%d rest=%d move=%d word=%d",
+             s_weights.drag, s_weights.click, s_weights.wheel,
+             s_weights.arrow, s_weights.rest, s_weights.move, s_weights.word);
+}
+
+void action_engine_set_sequence(const action_seq_t *seq)
+{
+    if (seq == NULL) {
+        return;
+    }
+    memcpy(&s_sequence, seq, sizeof(s_sequence));
+    s_seq_cursor = 0;
+    s_seq_shuffle_len = 0;
+    s_seq_once_stop = false;
+    if (s_sequence.cycle == CYCLE_SHUFFLE && s_sequence.count > 0) {
+        build_shuffle_order(&s_sequence);
+    }
+    ESP_LOGI(TAG, "xwQb：count=%d cycle=%d", s_sequence.count, s_sequence.cycle);
+}
+
+#define SCHED_TICK_MS       1000
+#define SCHED_STACK         3072
+#define SCHED_PRIORITY      (ACTION_TASK_PRIORITY - 2)
+
+static int64_t s_last_fire_min[TIMER_RULE_MAX];
+static int64_t s_boot_ms = 0;
+
+static int64_t now_ms_since_boot(void)
+{
+    return (int64_t)(esp_timer_get_time() / 1000LL);
+}
+
+static void scheduler_task(void *arg)
+{
+    (void)arg;
+    s_boot_ms = now_ms_since_boot();
+    for (int i = 0; i < TIMER_RULE_MAX; i++) {
+        s_last_fire_min[i] = -1;
+    }
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(SCHED_TICK_MS));
+
+        config_t *cfg = config_store_get();
+        if (cfg == NULL) {
+            continue;
+        }
+        int64_t elapsed_min = (now_ms_since_boot() - s_boot_ms) / 60000LL;
+
+        struct tm ti;
+        bool have_time = wifi_manager_get_local_time(&ti);
+        int cur_min_of_day = have_time ? (ti.tm_hour * 60 + ti.tm_min) : -1;
+
+        bool synced_now = wifi_manager_time_synced();
+        if (synced_now && !s_prev_synced) {
+            s_timeset_guard_until = esp_timer_get_time() + (int64_t)TIMESET_GUARD_US;
+            ESP_LOGI(TAG, "xBpilm，qd %d CwjofTnvQ",
+                     (int)(TIMESET_GUARD_US / 1000000));
+        }
+        s_prev_synced = synced_now;
+        if (synced_now && s_timeset_guard_until != 0 &&
+            esp_timer_get_time() < s_timeset_guard_until) {
+            continue;    
+        }
+
+        int64_t sched_stop_us = 0;
+        if (have_time) {
+            int64_t now = esp_timer_get_time();
+             
+            int64_t day_sec = (int64_t)ti.tm_hour * 3600 + ti.tm_min * 60 + ti.tm_sec;
+            int64_t day_us  = day_sec * 1000000LL;
+            for (uint8_t k = 0; k < cfg->timer_count && k < TIMER_RULE_MAX; k++) {
+                timer_rule_t *sr = &cfg->timers[k];
+                if (!sr->enabled || sr->type != TIMER_START_STOP || sr->ss_action != 1) {
+                    continue;
+                }
+                int64_t target_sec = (int64_t)sr->hour * 3600 + sr->minute * 60;
+                int64_t delta_us = (target_sec * 1000000LL) - day_us;
+                if (delta_us <= 0) {
+                    delta_us += 24LL * 3600 * 1000000LL;    
+                }
+                int64_t ts = now + delta_us;
+                if (sched_stop_us == 0 || ts < sched_stop_us) {
+                    sched_stop_us = ts;
+                }
+            }
+        }
+        s_sched_stop_deadline_us = sched_stop_us;
+
+        for (uint8_t i = 0; i < cfg->timer_count && i < TIMER_RULE_MAX; i++) {
+            timer_rule_t *r = &cfg->timers[i];
+            if (!r->enabled) {
+                continue;
+            }
+            if (r->type == TIMER_START_STOP) {
+                if (!have_time) {
+                    continue;
+                }
+                 
+                if (s_last_fire_min[i] == elapsed_min && elapsed_min >= 0) {
+                    continue;
+                }
+                if (cur_min_of_day == (r->hour * 60 + r->minute)) {
+                    s_last_fire_min[i] = elapsed_min;
+                     
+                    if (r->ss_action == 0) {
+                        ESP_LOGI(TAG, "[oRct] oa%d mdgQ", i);
+                        action_engine_start();
+                    } else {
+                        ESP_LOGI(TAG, "[yihc] sV%d Msol", i);
+                        s_sched_stop_deadline_us = 0;    
+                        action_engine_stop();
+                    }
+                }
+            } else if (r->type == TIMER_SINGLE_ACTION) {
+                if (!have_time) {
+                    continue;
+                }
+                if (s_last_fire_min[i] == elapsed_min && elapsed_min >= 0) {
+                    continue;
+                }
+                if (cur_min_of_day == (r->hour * 60 + r->minute)) {
+                    s_last_fire_min[i] = elapsed_min;
+                    ESP_LOGI(TAG, "[OmKGt] dy%d Wz", i);
+                    action_engine_run_single(r->action_id);
+                }
+            } else if (r->type == TIMER_PERIODIC) {
+                 
+                if (!have_time) {
+                    continue;
+                }
+                if (r->period_min == 0) {
+                    continue;
+                }
+                if (elapsed_min >= 0 && (elapsed_min % (int64_t)r->period_min) == 0
+                    && s_last_fire_min[i] != elapsed_min) {
+                    s_last_fire_min[i] = elapsed_min;
+                    ESP_LOGI(TAG, "[uYDC] RQ%d vqCQ(h%dM)", i, r->period_min);
+                    action_engine_trigger_sequence_once();
+                }
+            }
+        }
+    }
+}
+
+esp_err_t action_engine_start_scheduler(void)
+{
+    BaseType_t ok = xTaskCreate(scheduler_task, "km_sched", SCHED_STACK, NULL,
+                                SCHED_PRIORITY, NULL);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "PvciAggqPy");
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "JwTZGxdKg");
+    return ESP_OK;
+}

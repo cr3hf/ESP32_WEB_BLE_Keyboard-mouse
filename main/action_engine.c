@@ -19,6 +19,7 @@
 #include "ble_hid.h"
 #include "led_status.h"
 #include "action_engine.h"
+#include "text_store.h"
 
 static const char *TAG = "ACTION_ENGINE";
 
@@ -51,6 +52,7 @@ static const char *s_action_names[] = {
     "滑动鼠标", /* ACT_MOVE = 5 */
     "打字",   /* ACT_WORD  = 6 */
     "切换程序", /* ACT_ALT_TAB = 7 */
+    "写文本", /* ACT_TEXT  = 8 */
 };
 
 /* 当前动作的重复进度（供 Web 状态页展示，如“点击 2/10”）。
@@ -85,7 +87,7 @@ void action_engine_tick_progress(void)
 
 const char *action_engine_current_action_name(void)
 {
-    if (s_current_action >= ACT_DRAG && s_current_action <= ACT_ALT_TAB) {
+    if (s_current_action >= ACT_DRAG && s_current_action <= ACT_TEXT) {
         return s_action_names[s_current_action - ACT_DRAG];
     }
     return "休息";
@@ -144,7 +146,7 @@ static void scheduler_task(void *arg);
 static run_mode_t       s_run_mode   = RUN_MODE_RANDOM;
 static action_weights_t s_weights = {                 /* 默认 = 头文件宏值 */
     ACT_W_DRAG, ACT_W_CLICK, ACT_W_WHEEL, ACT_W_ARROW, ACT_W_REST, ACT_W_MOVE, ACT_W_WORD,
-    ACT_W_ALT_TAB,
+    ACT_W_ALT_TAB, ACT_W_TEXT,
 };
 static action_seq_t     s_sequence;                   /* 序列模式编排 */
 static uint8_t          s_seq_cursor = 0;             /* 序列游标 */
@@ -784,13 +786,118 @@ exit_release:
     action_release_all();
 }
 
+/* ---------------- 写文本动作的续写游标（仅内存，不持久化） ----------------
+ * 记录“下次写文本从文本的哪个字节继续”。仅当用户在 Web 修改文本后由
+ * action_engine_reset_text_cursor() 复位；输出到文本末尾时也会自动归零。
+ */
+static size_t s_text_cursor = 0;
+
+void action_engine_reset_text_cursor(void)
+{
+    s_text_cursor = 0;
+    ESP_LOGI(TAG, "写文本游标已复位，下次从头输出");
+}
+
+/* 动作9：写文本（长文本逐字符输出）
+ * - 先前置定位：连发 TEXT_PRE_PAGEDOWN_COUNT 个 PageDown，再发一次 End，
+ *   把目标文档光标移到末尾（每轮都做），确保新内容追加在文末；
+ * - 每轮从 text_char_limit_min~max 随机取一个“本轮输出字符数上限” N；
+ * - 从 s_text_cursor 起的文本逐字节转 HID 发送（\n→Enter，\t→Tab，\r 跳过）；
+ * - 累计输出达 N 且未到末尾：保存游标并结束本轮（下次从该处继续）；
+ * - 输出到文本末尾：本轮完成，游标归零（下次从头开始）。
+ */
+static void act_text(void)
+{
+    const action_timing_t *T = ae_timing();
+    const char *text = text_store_get();
+    size_t len = text_store_len();
+    if (text == NULL || len == 0) {
+        ESP_LOGW(TAG, "[动作] 写文本：文本为空，跳过");
+        return;
+    }
+    /* 游标越界保护（如文本被改短）：归零重头 */
+    if (s_text_cursor >= len) {
+        s_text_cursor = 0;
+    }
+
+    /* 前置定位：连发若干个 PageDown 再发一次 End，把光标移到文档末尾。
+     * 每轮写文本前都执行一次，保证本轮输出追加在文档最后。 */
+    for (int p = 0; p < TEXT_PRE_PAGEDOWN_COUNT; p++) {
+        ble_hid_send_key(HID_KEY_PAGE_DOWN, true);
+        if (!action_delay_ms(TEXT_PRE_KEY_HOLD_MS)) {
+            goto exit_release;
+        }
+        ble_hid_send_key(HID_KEY_PAGE_DOWN, false);
+        if (!action_delay_ms(TEXT_PRE_KEY_GAP_MS)) {
+            goto exit_release;
+        }
+    }
+    ble_hid_send_key(HID_KEY_END, true);
+    if (!action_delay_ms(TEXT_PRE_KEY_HOLD_MS)) {
+        goto exit_release;
+    }
+    ble_hid_send_key(HID_KEY_END, false);
+    if (!action_delay_ms(TEXT_PRE_KEY_GAP_MS)) {
+        goto exit_release;
+    }
+
+    int limit = rand_range(T->text_char_limit_min, T->text_char_limit_max);
+    if (limit < 1) limit = 1;
+
+    size_t i = s_text_cursor;
+    int n = 0;
+    ESP_LOGI(TAG, "[动作] 写文本 起点=%u 本轮上限=%d 文本长度=%u",
+             (unsigned)i, limit, (unsigned)len);
+    action_engine_set_progress_total(limit);
+
+    for (; i < len; i++) {
+        char c = text[i];
+        if (c == '\r') {
+            continue;   /* 换行已规范为 \n，残留 \r 直接跳过，避免重复回车 */
+        }
+        ble_hid_send_char(c);
+        n++;
+        action_engine_tick_progress();
+
+        uint32_t delay = (c == '\n')
+            ? (uint32_t)rand_range(T->text_line_delay_min, T->text_line_delay_max)
+            : (uint32_t)rand_range(T->text_char_delay_min, T->text_char_delay_max);
+        if (!action_delay_ms(delay)) {
+            /* 被 STOP/断连中断：保存当前进度，下次从此处继续 */
+            s_text_cursor = i + 1;
+            goto exit_release;
+        }
+
+        if (n >= limit) {
+            /* 达到本轮上限：保存游标，结束本轮（下次继续） */
+            s_text_cursor = i + 1;
+            goto done;
+        }
+    }
+
+    /* 输出到文本末尾：本轮完成，下次从头 */
+    s_text_cursor = 0;
+    ESP_LOGI(TAG, "[动作] 写文本：已到文本末尾，下次从头开始");
+
+done:
+    action_delay_ms(rand_range(T->text_end_delay_min, T->text_end_delay_max));
+
+exit_release:
+    action_release_all();
+}
+
 static void act_rest(void)
 {
     const action_timing_t *T = ae_timing();
-    int delay = rand_range(T->rest_delay_min, T->rest_delay_max);
-    ESP_LOGI(TAG, "[动作] 休息 %d ms", delay);
-    s_rest_end_us = esp_timer_get_time() + (int64_t)delay * 1000;
-    action_delay_ms((uint32_t)delay);
+    /* 休息时长单位为 ×100ms（如 60 = 6 秒） */
+    int units = rand_range(T->rest_delay_min, T->rest_delay_max);
+    if (units < 0) {
+        units = 0;
+    }
+    uint32_t delay_ms = (uint32_t)units * 100u;
+    ESP_LOGI(TAG, "[动作] 休息 %d 单位(×100ms) = %u ms", units, (unsigned)delay_ms);
+    s_rest_end_us = esp_timer_get_time() + (int64_t)delay_ms * 1000;
+    action_delay_ms(delay_ms);
     s_rest_end_us = 0;
     action_release_all();
 }
@@ -869,7 +976,7 @@ static action_id_t pick_action(void)
     int weights[ACT_COUNT] = {
         s_weights.drag, s_weights.click, s_weights.wheel,
         s_weights.arrow, s_weights.rest, s_weights.move, s_weights.word,
-        s_weights.alt_tab,
+        s_weights.alt_tab, s_weights.text,
     };
     int total = 0;
     for (int i = 0; i < ACT_COUNT; i++) {
@@ -907,6 +1014,7 @@ static void exec_action_by_id(uint8_t action_id)
     case ACT_MOVE:   act_move();       break;
     case ACT_WORD:   act_word();       break;
     case ACT_ALT_TAB: act_alt_tab();   break;
+    case ACT_TEXT:   act_text();       break;
     default:         act_rest();       break;
     }
 }
@@ -1472,10 +1580,10 @@ void action_engine_set_weights(const action_weights_t *w)
         return;
     }
     s_weights = *w;
-    ESP_LOGI(TAG, "权重更新：drag=%d click=%d wheel=%d arrow=%d rest=%d move=%d word=%d alt_tab=%d",
+    ESP_LOGI(TAG, "权重更新：drag=%d click=%d wheel=%d arrow=%d rest=%d move=%d word=%d alt_tab=%d text=%d",
              s_weights.drag, s_weights.click, s_weights.wheel,
              s_weights.arrow, s_weights.rest, s_weights.move, s_weights.word,
-             s_weights.alt_tab);
+             s_weights.alt_tab, s_weights.text);
 }
 
 void action_engine_set_sequence(const action_seq_t *seq)

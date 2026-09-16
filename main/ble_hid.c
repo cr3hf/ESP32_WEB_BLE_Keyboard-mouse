@@ -469,6 +469,27 @@ esp_err_t ble_hid_send_string(const char *str)
     return ESP_OK;
 }
 
+/* 单个字符发送（“写文本”动作用）：额外处理换行/制表符。
+ * Enter=0x28，Tab=0x2B（Keyboard/Keypad Page）。 */
+esp_err_t ble_hid_send_char(char c)
+{
+    uint8_t kc = 0;
+    bool shift = false;
+
+    if (c == '\n') {
+        kc = 0x28;   /* Enter */
+    } else if (c == '\t') {
+        kc = 0x2B;   /* Tab */
+    } else if (!char_to_hid(c, &kc, &shift)) {
+        return ESP_ERR_NOT_SUPPORTED;   /* 不支持的字符（如中文），跳过 */
+    }
+
+    uint8_t mods = shift ? (uint8_t)HID_MODIFIER_LEFT_SHIFT : 0u;
+    ble_hid_send_key_mods(kc, mods, true);
+    ble_hid_send_key_mods(kc, mods, false);
+    return ESP_OK;
+}
+
 esp_err_t ble_hid_reset(void)
 {
     ESP_LOGW(TAG, "===== 开始重置蓝牙：断开当前主机并清除全部配对记录 =====");

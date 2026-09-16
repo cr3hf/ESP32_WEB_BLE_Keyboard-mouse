@@ -28,6 +28,7 @@
 #include "wifi_manager.h"
 #include "defaults.h"
 #include "ble_hid.h"
+#include "text_store.h"
 
 static const char *TAG = "WEB_SRV";
 
@@ -164,6 +165,8 @@ static const char PAGE_HTML[] =
 "  min-height:100vh;padding-bottom:40px;\n"
 "}\n"
 ".wrap{max-width:1080px;margin:0 auto;padding:18px}\n"
+"/* 鉴权完成前隐藏主内容，避免先闪一下参数页再跳登录 */\n"
+".preauth .wrap,.preauth footer{visibility:hidden}\n"
 ".topbar{\n"
 "  position:sticky;top:0;z-index:20;display:flex;flex-direction:column;gap:8px;\n"
 "  padding:10px 20px;border-radius:18px;\n"
@@ -315,6 +318,10 @@ static const char PAGE_HTML[] =
 "</style>\n"
 "</head>\n"
 "<body>\n"
+"<script>\n"
+"document.documentElement.classList.add('preauth');\n"
+"setTimeout(function(){if(document.documentElement.classList.contains('preauth')){var m=document.getElementById('login-mask');if(m)m.classList.remove('hidden');}},6000);\n"
+"</script>\n"
 "<div id=\"login-mask\" class=\"hidden\">\n"
 "  <div class=\"login-card\">\n"
 "    <h2>" APP_TITLE " 配置台</h2>\n"
@@ -417,6 +424,23 @@ static const char PAGE_HTML[] =
 "      <h2>⌨️ 打字单词表</h2>\n"
 "      <div class='hint'>“打字”动作会从下列单词中随机抽词，逐字符发送（词后自动追加空格）。词与词之间用空格分隔，可填入 C/C++ 关键字、Nordic 编程库 API、常见变量名等。修改后请点击右上角「保存配置」一并写入（与权重/序列/定时共享一份配置，避免单独保存互相冲掉）；若为空则使用内置默认单词表。</div>\n"
 "      <textarea id='word-list' rows='6' style='width:100%;margin-top:10px;font-family:monospace;font-size:13px;padding:8px;border:1px solid #ccc;border-radius:6px;resize:vertical'></textarea>\n"
+"      <div style='margin-top:16px;border-top:1px solid rgba(148,163,184,.14);padding-top:14px'>\n"
+"        <h2 style='font-size:15px'>📝 文本输入（写文本）</h2>\n"
+"        <div class='hint'>“写文本”动作会把下面这段文本按字符逐个发送（含标点、空格、回车换行）。每轮随机输出一定数量字符（可在下方「写文本」时间组设置上下限），达到上限即本轮结束、下次接着写；写到文本末尾则下次从头开始。可上传 TXT 文件替换，也可复制/导出。</div>\n"
+"        <textarea id='text-input' rows='6' style='width:100%;margin-top:10px;font-family:monospace;font-size:13px;padding:8px;border:1px solid #ccc;border-radius:6px;resize:vertical'></textarea>\n"
+"        <div style='display:flex;justify-content:space-between;align-items:center;margin-top:6px;flex-wrap:wrap;gap:6px'>\n"
+"          <span id='text-count' style='color:var(--sub);font-size:12.5px'>0 / 131072</span>\n"
+"          <span style='color:var(--sub);font-size:12.5px'>修改后点「保存文本」生效（与其它配置分开保存）</span>\n"
+"        </div>\n"
+"        <div style='display:flex;flex-wrap:wrap;gap:8px;margin-top:10px'>\n"
+"          <button class='btn' id='text-upload-btn'>上传 TXT</button>\n"
+"          <input type='file' id='text-file' accept='.txt,text/plain' style='display:none'>\n"
+"          <button class='btn' id='text-save-btn'>保存文本</button>\n"
+"          <button class='btn ghost' id='text-export-btn'>导出 TXT</button>\n"
+"          <button class='btn ghost' id='text-copy-btn'>复制全文</button>\n"
+"          <button class='btn ghost' id='text-clear-btn'>清空</button>\n"
+"        </div>\n"
+"      </div>\n"
 "    </div>\n"
 "    <div class='card' style='grid-column:1/-1'>\n"
 "      <div style='display:flex;justify-content:space-between;align-items:center'>\n"
@@ -522,8 +546,8 @@ static const char PAGE_HTML[] =
 "  <span id='ota-msg' style='color:var(--sub);font-size:13px'></span>\n"
 "</footer>\n"
 "<script>\n"
-"const ACT_NAMES=['拖拽','点击','滚轮','方向键','休息','滑动','打字','切换程序'];\n"
-"const ACT_KEYS =['drag','click','wheel','arrow','rest','move','word','alt_tab'];\n"
+"const ACT_NAMES=['拖拽','点击','滚轮','方向键','休息','滑动','打字','切换程序','写文本'];\n"
+"const ACT_KEYS =['drag','click','wheel','arrow','rest','move','word','alt_tab','text'];\n"
 "let cfg=null;\n"
 "/* 安全绑定：元素不存在时跳过，避免单个缺失元素导致整个脚本崩溃（此前 reset-timing 缺失曾中断 loadAll） */\n"
 "/* ev 支持 'onclick'/'click' 等写法，统一规范为 'on'+事件名 作为元素属性赋值 */\n"
@@ -547,11 +571,13 @@ static const char PAGE_HTML[] =
 "    if(r.status===401){ handleUnauth(); } return j;}\n"
 "  finally{clearTimeout(t);}}\n"
 "function handleUnauth(){ clearToken(); showLogin('登录已失效，请重新登录'); }\n"
-"function showLogin(msg){const m=document.getElementById('login-mask');if(m)m.classList.remove('hidden');\n"
+"function showLogin(msg){document.documentElement.classList.add('preauth');\n"
+"  const m=document.getElementById('login-mask');if(m)m.classList.remove('hidden');\n"
 "  if(msg){const e=document.getElementById('li-msg');if(e){e.textContent=msg;e.className='login-msg err';}}\n"
 "  const wrap=document.querySelector('.wrap');if(wrap)wrap.style.visibility='hidden';\n"
 "  const ft=document.querySelector('footer');if(ft)ft.style.visibility='hidden';}\n"
-"function hideLogin(){const m=document.getElementById('login-mask');if(m)m.classList.add('hidden');\n"
+"function hideLogin(){document.documentElement.classList.remove('preauth');\n"
+"  const m=document.getElementById('login-mask');if(m)m.classList.add('hidden');\n"
 "  const wrap=document.querySelector('.wrap');if(wrap)wrap.style.visibility='visible';\n"
 "  const ft=document.querySelector('footer');if(ft)ft.style.visibility='visible';}\n"
 "async function doLogin(){const u=document.getElementById('li-user').value.trim();\n"
@@ -598,12 +624,13 @@ static const char PAGE_HTML[] =
 "  click_repeat_min:1,click_repeat_max:10,click_distance_min:10,click_distance_max:100,click_step_min:1,click_step_max:30,click_hold_min:20,click_hold_max:250,click_interval_min:100,click_interval_max:1000,click_end_delay_min:1000,click_end_delay_max:5000,\n"
 "  wheel_repeat_min:1,wheel_repeat_max:5,wheel_distance_min:10,wheel_distance_max:100,wheel_step_min:1,wheel_step_max:30,wheel_tick_min:1,wheel_tick_max:8,wheel_interval_min:100,wheel_interval_max:500,wheel_end_delay_min:1000,wheel_end_delay_max:5000,\n"
 "  arrow_repeat_min:1,arrow_repeat_max:20,arrow_interval_min:50,arrow_interval_max:800,arrow_end_delay_min:1000,arrow_end_delay_max:5000,\n"
-"  rest_delay_min:1000,rest_delay_max:20000,\n"
+"  rest_delay_min:10,rest_delay_max:200,\n"
 "  move_repeat_min:1,move_repeat_max:20,move_distance_min:10,move_distance_max:30,move_step_min:1,move_step_max:15,\n"
 "  move_interval_min:100,move_interval_max:500,move_end_delay_min:500,move_end_delay_max:1000,\n"
 "  led_blink_on_ms:80,led_freq_per_1min_ms:50,led_freq_max_ms:2000,led_blink_once_ms:200,led_blink_once_gap_ms:200,\n"
 "  word_repeat_min:1,word_repeat_max:5,word_char_delay_min:40,word_char_delay_max:700,word_space_delay_min:40,word_space_delay_max:1000,word_interval_min:500,word_interval_max:2000,word_end_delay_min:500,word_end_delay_max:1200,\n"
-"  alt_tab_repeat_min:0,alt_tab_repeat_max:1,alt_tab_interval_min:500,alt_tab_interval_max:1000,alt_tab_end_delay_min:700,alt_tab_end_delay_max:1500};}\n"
+"  alt_tab_repeat_min:0,alt_tab_repeat_max:1,alt_tab_interval_min:500,alt_tab_interval_max:1000,alt_tab_end_delay_min:700,alt_tab_end_delay_max:1500,\n"
+"  text_char_delay_min:40,text_char_delay_max:300,text_line_delay_min:80,text_line_delay_max:600,text_end_delay_min:500,text_end_delay_max:2000,text_char_limit_min:1000,text_char_limit_max:5000};}\n"
 "function defaultMotion(){return {screen_scale_pct:125,pos_limit_x:400,pos_limit_y:200,home_corner:0,home_push_px:2000,home_back_x:400,home_back_y:200};}\n"
 "function defaultProfile(){return {weights:JSON.parse(JSON.stringify(DEFAULT_CONFIG.weights)),timing:defaultTiming(),motion:defaultMotion()};}\n"
 "function defaultConfigFull(){const d=JSON.parse(JSON.stringify(DEFAULT_CONFIG));d.active_profile=0;d.motion=defaultMotion();d.profiles=[defaultProfile(),defaultProfile(),defaultProfile()];return d;}\n"
@@ -875,7 +902,7 @@ static const char PAGE_HTML[] =
 "  const j=await postConfig();toast(j.ok?'已恢复默认时间':'恢复失败');\n"
 "});\n"
 "/* 恢复全部默认参数：内置出厂默认值（与 ble_km-config-2026-08-26T06-43-13.json 一致） */\n"
-"const DEFAULT_CONFIG={run_mode:0,weights:{drag:0,click:50,wheel:50,arrow:30,rest:35,move:50,word:0,alt_tab:0},sequence:{actions:[5,1,2,5,1,2,5,1,3,2,1,5,1,2,4],cycle:0},timers:[{type:0,enabled:false,hour:18,minute:32,action_id:0,ss_action:1,period_min:1}],wifi:{sta_enabled:false,sta_ssid:\"\",sta_pass:\"\"},radio:{wifi_power_025dbm:40,ble_power_level:5},timing:{drag_repeat_min:1,drag_repeat_max:5,drag_distance_min:20,drag_distance_max:100,drag_step_min:10,drag_step_max:30,drag_interval_min:600,drag_interval_max:1500,drag_end_delay_min:500,drag_end_delay_max:5000,click_repeat_min:1,click_repeat_max:10,click_distance_min:10,click_distance_max:100,click_step_min:1,click_step_max:30,click_hold_min:20,click_hold_max:250,click_interval_min:100,click_interval_max:1000,click_end_delay_min:1000,click_end_delay_max:5000,wheel_repeat_min:1,wheel_repeat_max:5,wheel_distance_min:10,wheel_distance_max:100,wheel_step_min:1,wheel_step_max:30,wheel_tick_min:1,wheel_tick_max:8,wheel_interval_min:100,wheel_interval_max:500,wheel_end_delay_min:1000,wheel_end_delay_max:5000,arrow_repeat_min:1,arrow_repeat_max:20,arrow_interval_min:50,arrow_interval_max:800,arrow_end_delay_min:1000,arrow_end_delay_max:5000,rest_delay_min:1000,rest_delay_max:20000,move_repeat_min:1,move_repeat_max:20,move_distance_min:10,move_distance_max:30,move_step_min:1,move_step_max:15,move_interval_min:100,move_interval_max:500,move_end_delay_min:500,move_end_delay_max:1000,led_blink_on_ms:80,led_freq_per_1min_ms:50,led_freq_max_ms:2000,led_blink_once_ms:200,led_blink_once_gap_ms:200,word_repeat_min:1,word_repeat_max:5,word_char_delay_min:40,word_char_delay_max:700,word_space_delay_min:40,word_space_delay_max:1000,word_interval_min:500,word_interval_max:2000,word_end_delay_min:500,word_end_delay_max:1200,alt_tab_repeat_min:0,alt_tab_repeat_max:1,alt_tab_interval_min:500,alt_tab_interval_max:1000,alt_tab_end_delay_min:700,alt_tab_end_delay_max:1500},motion:defaultMotion(),word_list:\"struct enum uint8_t int32_t bool const static void nrf_gpio_pin_set nrf_drv_timer_trigger nrf_saadc_sample sd_ble_gap_connect sdk_config.h app_timer_start vector string mutex handle context buffer pointer sensor_value device_handle callback flag retry CONFIG_NRFX_TIMER_ENABLED NRFX_UARTE_ENABLED nrfx_uarte_tx nrf_ble_scan_start std_map std_shared_ptr spi_transfer i2c_read power_state ble_conn_handle tx_queue rx_buffer \"};\n"
+"const DEFAULT_CONFIG={run_mode:0,weights:{drag:0,click:50,wheel:50,arrow:30,rest:35,move:50,word:0,alt_tab:0,text:0},sequence:{actions:[5,1,2,5,1,2,5,1,3,2,1,5,1,2,4],cycle:0},timers:[{type:0,enabled:false,hour:18,minute:32,action_id:0,ss_action:1,period_min:1}],wifi:{sta_enabled:false,sta_ssid:\"\",sta_pass:\"\"},radio:{wifi_power_025dbm:40,ble_power_level:5},timing:{drag_repeat_min:1,drag_repeat_max:5,drag_distance_min:20,drag_distance_max:100,drag_step_min:10,drag_step_max:30,drag_interval_min:600,drag_interval_max:1500,drag_end_delay_min:500,drag_end_delay_max:5000,click_repeat_min:1,click_repeat_max:10,click_distance_min:10,click_distance_max:100,click_step_min:1,click_step_max:30,click_hold_min:20,click_hold_max:250,click_interval_min:100,click_interval_max:1000,click_end_delay_min:1000,click_end_delay_max:5000,wheel_repeat_min:1,wheel_repeat_max:5,wheel_distance_min:10,wheel_distance_max:100,wheel_step_min:1,wheel_step_max:30,wheel_tick_min:1,wheel_tick_max:8,wheel_interval_min:100,wheel_interval_max:500,wheel_end_delay_min:1000,wheel_end_delay_max:5000,arrow_repeat_min:1,arrow_repeat_max:20,arrow_interval_min:50,arrow_interval_max:800,arrow_end_delay_min:1000,arrow_end_delay_max:5000,rest_delay_min:10,rest_delay_max:200,move_repeat_min:1,move_repeat_max:20,move_distance_min:10,move_distance_max:30,move_step_min:1,move_step_max:15,move_interval_min:100,move_interval_max:500,move_end_delay_min:500,move_end_delay_max:1000,led_blink_on_ms:80,led_freq_per_1min_ms:50,led_freq_max_ms:2000,led_blink_once_ms:200,led_blink_once_gap_ms:200,word_repeat_min:1,word_repeat_max:5,word_char_delay_min:40,word_char_delay_max:700,word_space_delay_min:40,word_space_delay_max:1000,word_interval_min:500,word_interval_max:2000,word_end_delay_min:500,word_end_delay_max:1200,alt_tab_repeat_min:0,alt_tab_repeat_max:1,alt_tab_interval_min:500,alt_tab_interval_max:1000,alt_tab_end_delay_min:700,alt_tab_end_delay_max:1500},motion:defaultMotion(),word_list:\"struct enum uint8_t int32_t bool const static void nrf_gpio_pin_set nrf_drv_timer_trigger nrf_saadc_sample sd_ble_gap_connect sdk_config.h app_timer_start vector string mutex handle context buffer pointer sensor_value device_handle callback flag retry CONFIG_NRFX_TIMER_ENABLED NRFX_UARTE_ENABLED nrfx_uarte_tx nrf_ble_scan_start std_map std_shared_ptr spi_transfer i2c_read power_state ble_conn_handle tx_queue rx_buffer \"};\n"
 "on('reset-default-btn','onclick',()=>{\n"
 "  if(!confirm('确定将所有参数恢复为出厂默认值？\\n当前所有自定义配置（运行模式/权重/序列/定时/动作/WiFi/功率/单词）都会被覆盖。恢复后请点“保存配置”生效。'))return;\n"
 "  cfg=defaultConfigFull();\n"
@@ -991,8 +1018,8 @@ static const char PAGE_HTML[] =
 "    ['重复次数(次)','arrow_repeat_min','arrow_repeat_max',1,999],\n"
 "    ['动作间隔','arrow_interval_min','arrow_interval_max',50,5000],\n"
 "    ['结束延迟','arrow_end_delay_min','arrow_end_delay_max',50,60000]]},\n"
-"  {title:'休息',unit:'ms',rows:[\n"
-"    ['休息时长','rest_delay_min','rest_delay_max',500,60000]]},\n"
+"  {title:'休息',unit:'',rows:[\n"
+"    ['休息时长(×100ms，60=6秒)','rest_delay_min','rest_delay_max',1,36000]]},\n"
 "  {title:'滑动',unit:'',rows:[\n"
 "    ['重复次数(次)','move_repeat_min','move_repeat_max',1,999],\n"
 "    ['移动距离(像素)','move_distance_min','move_distance_max',10,2000],\n"
@@ -1014,7 +1041,12 @@ static const char PAGE_HTML[] =
 "    ['每分钟闪烁间隔基准','led_freq_per_1min_ms',null,5,1000],\n"
 "    ['闪烁间隔上限','led_freq_max_ms',null,50,10000],\n"
 "    ['确认闪烁时长','led_blink_once_ms',null,10,2000],\n"
-"    ['确认闪烁间隔','led_blink_once_gap_ms',null,10,2000]]}\n"
+"    ['确认闪烁间隔','led_blink_once_gap_ms',null,10,2000]]},\n"
+"  {title:'写文本',unit:'',rows:[\n"
+"    ['字符间隔(ms)','text_char_delay_min','text_char_delay_max',5,2000],\n"
+"    ['换行处间隔(ms)','text_line_delay_min','text_line_delay_max',5,5000],\n"
+"    ['结束延迟(ms)','text_end_delay_min','text_end_delay_max',50,60000],\n"
+"    ['每轮字符数(个)','text_char_limit_min','text_char_limit_max',1,131072]]}\n"
 "];\n"
 "function renderTiming(){\n"
 " try{\n"
@@ -1058,7 +1090,7 @@ static const char PAGE_HTML[] =
 "}\n"
 "/* 状态/实时时间轮询：1s 一次，页面切到后台时暂停，减少对 STA 连接的持续占用 */\n"
 "/* 登录门控：无有效 token 时只显示登录框，不加载配置/状态（查看与配置均受登录保护） */\n"
-"function afterLogin(){ loadAll().catch(e=>console.error('loadAll',e)); refreshStatus();\n"
+"function afterLogin(){ loadAll().catch(e=>console.error('loadAll',e)); loadText(); refreshStatus();\n"
 "  setTimeout(()=>{ if(cfg===null){ const t=document.getElementById('toast'); if(t){t.textContent='页面加载不完整，正在重试…';t.classList.add('show');} location.reload(); } },800); }\n"
 "if(!getToken()){ showLogin(); }\n"
 "else { (async()=>{ const s=await api('/api/status');\n"
@@ -1090,6 +1122,66 @@ static const char PAGE_HTML[] =
 "window.addEventListener('load',()=>{\n"
 "  setTimeout(()=>{ setInterval(()=>{ if(!document.hidden) refreshStatus(); },1000); },1500);\n"
 "});\n"
+"/* ===== 写文本：文本加载 / 保存 / 导出 / 上传 / 复制 ===== */\n"
+"const TEXT_MAX=131072;\n"
+"function updateTextCount(){const el=document.getElementById('text-input');const c=document.getElementById('text-count');if(!el||!c)return;\n"
+"  const n=el.value.length;c.textContent=n+' / '+TEXT_MAX;c.style.color=(n>TEXT_MAX)?'#ef4444':'var(--sub)';}\n"
+"async function loadText(){\n"
+"  const el=document.getElementById('text-input');if(!el)return;\n"
+"  try{\n"
+"    const tk=getToken();const hdr=tk?{Authorization:'Bearer '+tk}:{};\n"
+"    const r=await fetch('/api/text',{headers:hdr});\n"
+"    if(r.status===401){handleUnauth();return;}\n"
+"    if(r.ok){el.value=await r.text();updateTextCount();}\n"
+"  }catch(e){ /* 读取失败保持为空，用户可上传或粘贴 */ }\n"
+"}\n"
+"async function saveText(){\n"
+"  const el=document.getElementById('text-input');if(!el)return;\n"
+"  const s=el.value;\n"
+"  if(s.length>TEXT_MAX){toast('文本超过 '+TEXT_MAX+' 字符，请精简后再保存');return;}\n"
+"  const btn=document.getElementById('text-save-btn');if(btn)btn.disabled=true;\n"
+"  try{\n"
+"    const tk=getToken();const hdr={'Content-Type':'text/plain; charset=utf-8'};if(tk)hdr.Authorization='Bearer '+tk;\n"
+"    const r=await fetch('/api/text',{method:'POST',headers:hdr,body:s});\n"
+"    if(r.status===401){handleUnauth();return;}\n"
+"    let j={};try{j=await r.json();}catch(e){}\n"
+"    toast(j.ok?('文本已保存（'+s.length+' 字符），下次从头输出'):('保存失败：'+(j.msg||r.status)));\n"
+"  }catch(e){toast('保存失败：网络错误');}\n"
+"  finally{if(btn)btn.disabled=false;}\n"
+"}\n"
+"on('text-save-btn','onclick',saveText);\n"
+"on('text-upload-btn','onclick',()=>{const f=document.getElementById('text-file');if(f)f.click();});\n"
+"on('text-file','onchange',(e)=>{\n"
+"  const f=e.target.files&&e.target.files[0];e.target.value='';\n"
+"  if(!f){return;}\n"
+"  const reader=new FileReader();\n"
+"  reader.onerror=()=>{toast('读取文件失败');};\n"
+"  reader.onload=()=>{const el=document.getElementById('text-input');if(!el)return;\n"
+"    el.value=reader.result||'';updateTextCount();\n"
+"    toast('已载入 TXT（'+el.value.length+' 字符），点「保存文本」写入设备');};\n"
+"  reader.readAsText(f,'UTF-8');\n"
+"});\n"
+"on('text-export-btn','onclick',async()=>{\n"
+"  try{\n"
+"    const tk=getToken();const hdr=tk?{Authorization:'Bearer '+tk}:{};\n"
+"    const r=await fetch('/api/text',{headers:hdr});\n"
+"    if(r.status===401){handleUnauth();return;}\n"
+"    if(!r.ok){toast('导出失败');return;}\n"
+"    const txt=await r.text();const blob=new Blob([txt],{type:'text/plain;charset=utf-8'});\n"
+"    const url=URL.createObjectURL(blob);const a=document.createElement('a');\n"
+"    const ts=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);\n"
+"    a.href=url;a.download='text-'+ts+'.txt';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);\n"
+"    toast('已导出文本 TXT');\n"
+"  }catch(e){toast('导出失败：网络错误');}\n"
+"});\n"
+"on('text-copy-btn','onclick',async()=>{\n"
+"  const el=document.getElementById('text-input');if(!el)return;\n"
+"  try{await navigator.clipboard.writeText(el.value);toast('已复制全文');}\n"
+"  catch(e){el.select();try{document.execCommand('copy');toast('已复制全文');}catch(_){toast('复制失败，请手动选择复制');}}\n"
+"});\n"
+"on('text-clear-btn','onclick',()=>{const el=document.getElementById('text-input');if(!el)return;\n"
+"  if(!confirm('确定清空文本框？（清空后需点「保存文本」才会写入设备）'))return;el.value='';updateTextCount();});\n"
+"on('text-input','input',updateTextCount);\n"
 "</script>\n"
 "</body>\n"
 "</html>\n";
@@ -1398,6 +1490,7 @@ static void json_parse_weights(cJSON *w, action_weights_t *wt)
     if ((f = cJSON_GetObjectItem(w, "move")))    wt->move = f->valueint;
     if ((f = cJSON_GetObjectItem(w, "word")))    wt->word = f->valueint;
     if ((f = cJSON_GetObjectItem(w, "alt_tab"))) wt->alt_tab = f->valueint;
+    if ((f = cJSON_GetObjectItem(w, "text")))    wt->text = f->valueint;
 }
 
 static void json_parse_motion(cJSON *mo, motion_cfg_t *m)
@@ -1457,6 +1550,10 @@ static void json_parse_timing(cJSON *tm, action_timing_t *t)
     TINT(alt_tab_repeat_min); TINT(alt_tab_repeat_max);
     TINT(alt_tab_interval_min);TINT(alt_tab_interval_max);
     TINT(alt_tab_end_delay_min); TINT(alt_tab_end_delay_max);
+    TINT(text_char_delay_min); TINT(text_char_delay_max);
+    TINT(text_line_delay_min); TINT(text_line_delay_max);
+    TINT(text_end_delay_min);  TINT(text_end_delay_max);
+    TINT(text_char_limit_min); TINT(text_char_limit_max);
     #undef TINT
 }
 
@@ -1649,6 +1746,7 @@ static cJSON *json_weights_obj(const action_weights_t *wt)
     cJSON_AddNumberToObject(w, "move", wt->move);
     cJSON_AddNumberToObject(w, "word", wt->word);
     cJSON_AddNumberToObject(w, "alt_tab", wt->alt_tab);
+    cJSON_AddNumberToObject(w, "text", wt->text);
     return w;
 }
 
@@ -1708,6 +1806,10 @@ static cJSON *json_timing_obj(const action_timing_t *t)
     TADD(alt_tab_repeat_min); TADD(alt_tab_repeat_max);
     TADD(alt_tab_interval_min);TADD(alt_tab_interval_max);
     TADD(alt_tab_end_delay_min); TADD(alt_tab_end_delay_max);
+    TADD(text_char_delay_min); TADD(text_char_delay_max);
+    TADD(text_line_delay_min); TADD(text_line_delay_max);
+    TADD(text_end_delay_min);  TADD(text_end_delay_max);
+    TADD(text_char_limit_min); TADD(text_char_limit_max);
     #undef TADD
     return o;
 }
@@ -1866,6 +1968,70 @@ static esp_err_t handler_config_post(httpd_req_t *req)
 
     cJSON *ok = cJSON_CreateObject();
     cJSON_AddBoolToObject(ok, "ok", true);
+    return send_json(req, ok, 200);
+}
+
+/* ---------------- /api/text：读写“写文本”动作使用的长文本 ----------------
+ * GET  : 以 text/plain 返回原始文本（供页面加载与导出 TXT）。
+ * POST : 请求体即原始文本（UTF-8），限 TEXT_MAX 字节；保存成功后复位续写游标。
+ * 文本独立于主配置（NVS 容量不足），不并入 /api/config。
+ */
+static esp_err_t handler_text_get(httpd_req_t *req)
+{
+    if (!require_auth(req)) return ESP_OK;
+    const char *txt = text_store_get();
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, txt, strlen(txt));
+}
+
+static esp_err_t handler_text_post(httpd_req_t *req)
+{
+    if (!require_auth(req)) return ESP_OK;
+    /* 预检：若设备分区表缺少 textdb，提前给出可操作的提示（而不是笼统的 invalid state） */
+    if (!text_store_is_ready()) {
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddBoolToObject(e, "ok", false);
+        cJSON_AddStringToObject(e, "msg",
+            "设备未识别到 textdb 文本分区，无法保存。请用 idf.py flash 完整烧录"
+            "（含分区表）后重试；网页「升级固件」只更新程序、不更新分区表。");
+        return send_json(req, e, 400);
+    }
+    int len = req->content_len;
+    if (len < 0 || len > TEXT_MAX) {
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddBoolToObject(e, "ok", false);
+        char m[64];
+        snprintf(m, sizeof(m), "文本过大(%d)，上限 %d 字节", len, TEXT_MAX);
+        cJSON_AddStringToObject(e, "msg", m);
+        return send_json(req, e, 400);
+    }
+    char *buf = malloc((size_t)len + 1);
+    if (buf == NULL) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    if (len > 0 && !recv_full_body(req, buf, len)) {
+        free(buf);
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    buf[len] = '\0';
+
+    /* 写 Flash 前先停止动作引擎，避免与正在执行的 HID 动作并发写分区 */
+    action_engine_stop_and_wait(2000);
+
+    esp_err_t err = text_store_save(buf, (size_t)len);
+    free(buf);
+    if (err == ESP_OK) {
+        action_engine_reset_text_cursor();   /* 文本已变化，下次从头输出 */
+    }
+
+    cJSON *ok = cJSON_CreateObject();
+    cJSON_AddBoolToObject(ok, "ok", err == ESP_OK);
+    if (err != ESP_OK) {
+        cJSON_AddStringToObject(ok, "msg", esp_err_to_name(err));
+    }
     return send_json(req, ok, 200);
 }
 
@@ -2161,6 +2327,8 @@ esp_err_t web_server_start(void)
         { .uri = "/api/status",  .method = HTTP_GET,  .handler = handler_status,     .user_ctx = NULL },
         { .uri = "/api/config",  .method = HTTP_GET,  .handler = handler_config_get, .user_ctx = NULL },
         { .uri = "/api/config",  .method = HTTP_POST, .handler = handler_config_post,.user_ctx = NULL },
+        { .uri = "/api/text",    .method = HTTP_GET,  .handler = handler_text_get,   .user_ctx = NULL },
+        { .uri = "/api/text",    .method = HTTP_POST, .handler = handler_text_post,  .user_ctx = NULL },
         { .uri = "/api/control", .method = HTTP_POST, .handler = handler_control,    .user_ctx = NULL },
         { .uri = "/api/wifi",    .method = HTTP_POST, .handler = handler_wifi,       .user_ctx = NULL },
         { .uri = "/api/time",    .method = HTTP_GET,  .handler = handler_time,       .user_ctx = NULL },

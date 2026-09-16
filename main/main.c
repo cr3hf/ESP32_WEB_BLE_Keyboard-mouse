@@ -26,6 +26,7 @@
 #include "hid_keys.h"
 #include "action_engine.h"
 #include "config_store.h"
+#include "text_store.h"
 #include "wifi_manager.h"
 #include "web_server.h"
 
@@ -62,6 +63,12 @@ void app_main(void)
     /* 4. 配置存储：从 NVS 加载用户配置（运行模式/权重/序列/定时/射频功率/STA 凭据）。
      *    必须在 ble_hid_init / wifi_manager_start 之前，以便它们读取保存的功率与 STA 配置。 */
     ESP_ERROR_CHECK(config_store_load());
+
+    /* 4.1 长文本存储：加载“写文本”动作使用的文本（独立 Flash 分区 textdb → PSRAM 缓冲）。
+     *     分区为空时写入内置默认文本（工程根 Note.txt，构建期生成）。失败不阻断启动。 */
+    if (text_store_init() != ESP_OK) {
+        ESP_LOGW(TAG, "文本存储初始化失败，“写文本”动作将不可用");
+    }
 
     /* 5. WiFi：先启动并让 STA 抢先连路由器（见下方说明），SoftAP 常开（热点名见启动日志 / 192.168.4.1）。
      *    顺序很关键：必须早于 BLE 初始化！电脑蓝牙一直连着本设备，若 BLE 先起会立刻抢占射频，

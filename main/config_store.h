@@ -30,6 +30,7 @@ typedef enum {
     ACT_MOVE,       /* 滑动鼠标 */
     ACT_WORD,       /* 打字：从单词表随机抽词，逐字符发送 */
     ACT_ALT_TAB,    /* 切换程序：Alt+Tab 组合键（次数可配 0~1） */
+    ACT_TEXT,       /* 写文本：把长文本按字符逐字输出（支持标点/空格/回车换行） */
     ACT_COUNT,
 } act_id_t;
 
@@ -63,6 +64,7 @@ typedef struct {
     int move;
     int word;       /* 打字（随机单词） */
     int alt_tab;    /* 切换程序（Alt+Tab） */
+    int text;       /* 写文本（长文本逐字符输出） */
 } action_weights_t;
 
 /* ---------------- 动作序列（上限 64 项） ---------------- */
@@ -168,6 +170,11 @@ typedef struct {
     int alt_tab_repeat_min, alt_tab_repeat_max;         /* 切换次数（0~1 次） */
     int alt_tab_interval_min, alt_tab_interval_max;     /* 每次按键之间的间隔（ms） */
     int alt_tab_end_delay_min, alt_tab_end_delay_max;   /* 动作结束后的休息时间（ms） */
+    /* 写文本（长文本逐字符输出） */
+    int text_char_delay_min, text_char_delay_max;       /* 字符间延迟（ms） */
+    int text_line_delay_min, text_line_delay_max;       /* 换行处的延迟（ms） */
+    int text_end_delay_min, text_end_delay_max;         /* 动作结束后的休息时间（ms） */
+    int text_char_limit_min, text_char_limit_max;       /* 每轮输出字符数上下限（随机） */
 } action_timing_t;
 
 /* ---------------- 运动模式参数（Web 可配；随 3 套参数各自独立） ----------------
@@ -216,9 +223,13 @@ typedef struct {
  *        改为“版本或长度不一致即整体重置为默认值”，不再做字节级迁移，杜绝错位损坏。
  *   12 —— 引入“3 套参数(profiles)”：仅动作时间/运动模式/随机权重随套数独立，
  *        其余参数共用；新增 active_profile（选择即生效，其余套只保存不生效）、motion_cfg_t。
+ *   13 —— 新增“写文本”动作：weights.text 与 timing.text_*（字符/换行/结束延迟 +
+ *        每轮字符数上下限）。长文本本身存于独立 Flash 分区（见 text_store），不进本结构。
+ *   14 —— “休息”动作时间单位改为 ×100ms（如 60 = 6 秒）；rest_delay_min/max 语义变更，
+ *        默认值相应改为 10 / 200（即 1s / 20s）。
  * 约定：旧配置与新布局不兼容时统一重置为默认（会清空 WiFi 凭据等，需重新在页面配置）。
  */
-#define CFG_VERSION  12
+#define CFG_VERSION  14
 typedef struct {
     uint32_t        version;            /* 结构版本，便于后续扩展兼容 */
     uint8_t         active_profile;     /* 当前生效的参数套序号 0~(PROFILE_COUNT-1)（选择即生效，其余套只保存不生效） */
