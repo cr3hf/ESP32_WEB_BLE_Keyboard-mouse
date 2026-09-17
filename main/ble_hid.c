@@ -420,7 +420,10 @@ static bool char_to_hid(char c, uint8_t *keycode, bool *need_shift)
     *need_shift = false;
     if (c >= 'a' && c <= 'z') { *keycode = 0x04 + (c - 'a'); return true; }
     if (c >= 'A' && c <= 'Z') { *keycode = 0x04 + (c - 'A'); *need_shift = true; return true; }
-    if (c >= '0' && c <= '9') { *keycode = 0x1E + (c - '0'); return true; }
+    /* 数字行：'1'..'9' → 0x1E..0x26，而 '0' 位于 0x27（不在顺延位置），
+     * 不能统一用 0x1E + (c - '0')，否则 '0' 会被当成 '1'。 */
+    if (c >= '1' && c <= '9') { *keycode = 0x1E + (c - '1'); return true; }
+    if (c == '0') { *keycode = 0x27; return true; }
     switch (c) {
         case ' ': *keycode = 0x2C; return true;
         /* 数字行上的 Shift 符号（keycode 与对应数字相同，需 Shift） */

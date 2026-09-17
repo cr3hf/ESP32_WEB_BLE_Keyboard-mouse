@@ -148,7 +148,7 @@ static const char PAGE_HTML[] =
 "<head>\n"
 "<meta charset='UTF-8'>\n"
 "<meta name='viewport' content='width=device-width, initial-scale=1.0'>\n"
-"<title>" APP_TITLE "控制台</title>\n"
+"<title>控制台</title>\n"
 "<style>\n"
 ":root{\n"
 "  --bg0:#0B1120; --bg1:#111827; --bg2:#1E293B;\n"
@@ -352,7 +352,7 @@ static const char PAGE_HTML[] =
 "</script>\n"
 "<div id=\"login-mask\" class=\"hidden\">\n"
 "  <div class=\"login-card\">\n"
-"    <h2>" APP_TITLE " 配置台</h2>\n"
+"    <h2 id='login-title'>配置台</h2>\n"
 "    <p class=\"sub\">请登录后再查看与配置参数</p>\n"
 "    <label for=\"li-user\">用户名</label>\n"
 "    <input id=\"li-user\" type=\"text\" autocomplete=\"username\" placeholder=\"用户名\">\n"
@@ -382,8 +382,8 @@ static const char PAGE_HTML[] =
 "      <div class='brand'>\n"
 "        <div class='logo'>CK</div>\n"
 "        <div>\n"
-"          <h1>" APP_TITLE "控制台</h1>\n"
-"          <div class='sub'>" APP_TITLE " · 本地配置 · 无需联网</div>\n"
+"          <h1 id='top-title'>控制台</h1>\n"
+"          <div class='sub' id='top-sub'>本地配置 · 无需联网</div>\n"
 "        </div>\n"
 "      </div>\n"
 "      <div class='stats'>\n"
@@ -579,6 +579,7 @@ static const char PAGE_HTML[] =
 "const ACT_KEYS =['drag','click','wheel','arrow','rest','move','word','alt_tab','text'];\n"
 "let cfg=null;\n"
 "let _cfgFailed=false;   /* 配置读取是否失败（用于触发一次自动重载） */\n"
+"let exportPrefix='ble_km-config';   /* 导出文件名前缀，由 /api/brand 下发（取自固件宏 EXPORT_FILE_PREFIX） */\n"
 "/* 安全绑定：元素不存在时跳过，避免单个缺失元素导致整个脚本崩溃（此前 reset-timing 缺失曾中断 loadAll） */\n"
 "/* ev 支持 'onclick'/'click' 等写法，统一规范为 'on'+事件名 作为元素属性赋值 */\n"
 "function on(id,ev,fn){const e=document.getElementById(id);if(!e){console.warn('元素缺失，跳过绑定：'+id);return;}\n"
@@ -590,6 +591,19 @@ static const char PAGE_HTML[] =
 "function getToken(){return localStorage.getItem(TOKEN_KEY)||'';}\n"
 "function setToken(v){localStorage.setItem(TOKEN_KEY,v);}\n"
 "function clearToken(){localStorage.removeItem(TOKEN_KEY);}\n"
+"/* 品牌信息（页面标题 / 导出文件名前缀）由固件下发，避免在构建期“猜”宏值 */\n"
+"async function loadBrand(){\n"
+"  try{ const r=await fetch('/api/brand'); if(!r.ok)return;\n"
+"    const b=await r.json(); if(!b)return;\n"
+"    if(b.export_prefix)exportPrefix=b.export_prefix;\n"
+"    if(b.app_title){\n"
+"      document.title=b.app_title+'控制台';\n"
+"      const t1=document.getElementById('top-title');if(t1)t1.textContent=b.app_title+'控制台';\n"
+"      const t2=document.getElementById('login-title');if(t2)t2.textContent=b.app_title+' 配置台';\n"
+"      const t3=document.getElementById('top-sub');if(t3)t3.textContent=b.app_title+' · 本地配置 · 无需联网';\n"
+"    }\n"
+"  }catch(e){}\n"
+"}\n"
 "async function api(path,opt){const ctl=new AbortController();const t=setTimeout(()=>ctl.abort(),15000);\n"  // 15s：弱网下配置 JSON 可能较慢，4s 会把响应中途掐断
 "  const tk=getToken();const hdr=tk?{Authorization:'Bearer '+tk}:{};\n"
 "  try{const r=await fetch(path,{...opt,headers:{...hdr,...(opt&&opt.headers)},signal:ctl.signal});\n"
@@ -661,7 +675,7 @@ static const char PAGE_HTML[] =
 "  led_blink_on_ms:80,led_freq_per_1min_ms:50,led_freq_max_ms:2000,led_blink_once_ms:200,led_blink_once_gap_ms:200,\n"
 "  word_repeat_min:1,word_repeat_max:5,word_char_delay_min:40,word_char_delay_max:700,word_space_delay_min:40,word_space_delay_max:1000,word_interval_min:500,word_interval_max:2000,word_end_delay_min:500,word_end_delay_max:1200,\n"
 "  alt_tab_repeat_min:0,alt_tab_repeat_max:1,alt_tab_interval_min:500,alt_tab_interval_max:1000,alt_tab_end_delay_min:700,alt_tab_end_delay_max:1500,\n"
-"  text_char_delay_min:40,text_char_delay_max:300,text_line_delay_min:80,text_line_delay_max:600,text_end_delay_min:500,text_end_delay_max:2000,text_char_limit_min:1000,text_char_limit_max:5000};}\n"
+"  text_char_delay_min:40,text_char_delay_max:300,text_line_delay_min:80,text_line_delay_max:600,text_end_delay_min:500,text_end_delay_max:2000,text_char_limit_min:1000,text_char_limit_max:5000,text_pre_pagedown_count:16,text_skip_line_indent:0};}\n"
 "function defaultMotion(){return {screen_scale_pct:125,pos_limit_x:400,pos_limit_y:200,home_corner:0,home_push_px:2000,home_back_x:400,home_back_y:200};}\n"
 "function defaultProfile(){return {weights:JSON.parse(JSON.stringify(DEFAULT_CONFIG.weights)),timing:defaultTiming(),motion:defaultMotion()};}\n"
 "function defaultConfigFull(){const d=JSON.parse(JSON.stringify(DEFAULT_CONFIG));d.active_profile=0;d.motion=defaultMotion();d.profiles=[defaultProfile(),defaultProfile(),defaultProfile()];return d;}\n"
@@ -890,7 +904,7 @@ static const char PAGE_HTML[] =
 "  const url=URL.createObjectURL(blob);\n"
 "  const a=document.createElement('a');\n"
 "  const ts=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);\n"
-"  a.href=url;a.download='" EXPORT_FILE_PREFIX "'+'-'+ts+'.json';\n"
+"  a.href=url;a.download=exportPrefix+'-'+ts+'.json';\n"
 "  document.body.appendChild(a);a.click();a.remove();\n"
 "  URL.revokeObjectURL(url);\n"
 "  toast('已导出全部参数(JSON)');\n"
@@ -1077,7 +1091,9 @@ static const char PAGE_HTML[] =
 "    ['字符间隔(ms)','text_char_delay_min','text_char_delay_max',5,2000],\n"
 "    ['换行处间隔(ms)','text_line_delay_min','text_line_delay_max',5,5000],\n"
 "    ['结束延迟(ms)','text_end_delay_min','text_end_delay_max',50,60000],\n"
-"    ['每轮字符数(个)','text_char_limit_min','text_char_limit_max',1,131072]]}\n"
+"    ['每轮字符数(个)','text_char_limit_min','text_char_limit_max',1,131072],\n"
+"    ['前置PageDown次数(次)','text_pre_pagedown_count',null,0,1000],\n"
+"    ['回车后屏蔽行首空格(0关/1开)','text_skip_line_indent',null,0,1]]}\n"
 "];\n"
 "function renderTiming(){\n"
 " try{\n"
@@ -1132,6 +1148,7 @@ static const char PAGE_HTML[] =
 "    if(!once)location.reload(); },5000); }\n"
 "/* 供 <body> 顶部自包含登录脚本在登录成功后回调（揭示页面并加载数据） */\n"
 "window.__afterLogin=function(){hideLogin();afterLogin();};\n"
+"loadBrand();   /* 先取品牌/导出前缀（公开接口，无需登录），保证登录页标题与导出文件名前缀正确 */\n"
 "if(!getToken()){ showLogin(); }\n"
 "else { (async()=>{ const s=await api('/api/status');\n"
 "  if(s && s.ok){ hideLogin(); afterLogin(); } else { clearToken(); showLogin('登录已失效，请重新登录'); } })(); }\n"
@@ -1220,7 +1237,7 @@ static const char PAGE_HTML[] =
 "    const txt=await r.text();const blob=new Blob([txt],{type:'text/plain;charset=utf-8'});\n"
 "    const url=URL.createObjectURL(blob);const a=document.createElement('a');\n"
 "    const ts=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);\n"
-"    a.href=url;a.download='text-'+ts+'.txt';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);\n"
+"    a.href=url;a.download=exportPrefix+'-text-'+ts+'.txt';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);\n"
 "    toast('已导出文本 TXT');\n"
 "  }catch(e){toast('导出失败：网络错误');}\n"
 "});\n"
@@ -1672,6 +1689,8 @@ static void json_parse_timing(cJSON *tm, action_timing_t *t)
     TINT(text_line_delay_min); TINT(text_line_delay_max);
     TINT(text_end_delay_min);  TINT(text_end_delay_max);
     TINT(text_char_limit_min); TINT(text_char_limit_max);
+    TINT(text_pre_pagedown_count);
+    TINT(text_skip_line_indent);
     #undef TINT
 }
 
@@ -1928,6 +1947,8 @@ static cJSON *json_timing_obj(const action_timing_t *t)
     TADD(text_line_delay_min); TADD(text_line_delay_max);
     TADD(text_end_delay_min);  TADD(text_end_delay_max);
     TADD(text_char_limit_min); TADD(text_char_limit_max);
+    TADD(text_pre_pagedown_count);
+    TADD(text_skip_line_indent);
     #undef TADD
     return o;
 }
@@ -2178,6 +2199,20 @@ static esp_err_t handler_text_post(httpd_req_t *req)
         cJSON_AddStringToObject(ok, "msg", esp_err_to_name(err));
     }
     return send_json(req, ok, 200);
+}
+
+/* ---------------- /api/brand：品牌与导出文件名前缀（公开，无需登录） ----------------
+ * 页面标题、导出文件名前缀等由固件宏（APP_TITLE / EXPORT_FILE_PREFIX）决定。
+ * 这些宏可能定义在 defaults.h 或 local_defs.h 的多个 #if 分支里，
+ * 构建期静态解析容易取到“未生效的那一支”；故改为运行期由固件把真实值下发给前端。 */
+static esp_err_t handler_brand(httpd_req_t *req)
+{
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "ok", true);
+    cJSON_AddStringToObject(o, "app_title", APP_TITLE);
+    cJSON_AddStringToObject(o, "export_prefix", EXPORT_FILE_PREFIX);
+    cJSON_AddStringToObject(o, "ble_name", BLE_DEVICE_NAME);
+    return send_json(req, o, 200);
 }
 
 /* ---------------- /api/control ---------------- */
@@ -2473,6 +2508,7 @@ esp_err_t web_server_start(void)
         { .uri = "/api/logout",  .method = HTTP_POST, .handler = handler_logout,     .user_ctx = NULL },
         { .uri = "/api/setauth", .method = HTTP_POST, .handler = handler_setauth,    .user_ctx = NULL },
         { .uri = "/api/factory_reset", .method = HTTP_POST, .handler = handler_factory_reset, .user_ctx = NULL },
+        { .uri = "/api/brand",   .method = HTTP_GET,  .handler = handler_brand,      .user_ctx = NULL },
         { .uri = "/api/status",  .method = HTTP_GET,  .handler = handler_status,     .user_ctx = NULL },
         { .uri = "/api/config",  .method = HTTP_GET,  .handler = handler_config_get, .user_ctx = NULL },
         { .uri = "/api/config",  .method = HTTP_POST, .handler = handler_config_post,.user_ctx = NULL },

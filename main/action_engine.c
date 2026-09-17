@@ -390,17 +390,16 @@ static bool mouse_move_random(int32_t dist_min, int32_t dist_max,
     return ok;
 }
 
-/* 滚轮：delta>0 上滚，<0 下滚。同样按 ≤127 分片。 */
-static void mouse_wheel(int8_t delta)
+/* 滚轮：delta>0 上滚，<0 下滚。按 ≤127 分片发送（支持任意大小的累计补偿）。 */
+static void mouse_wheel(int32_t delta)
 {
     if (delta == 0) {
         return;
     }
-    int8_t sign = (delta > 0) ? 1 : -1;
-    int8_t rem = (int8_t)(delta > 0 ? delta : -delta);
+    int8_t  sign = (delta > 0) ? 1 : -1;
+    int32_t rem  = (delta > 0) ? delta : -delta;
     while (rem > 0) {
-        /* rem 为 int8_t，最大值 127，单帧即可发送，无需再分片 */
-        int8_t step = rem;
+        int32_t step = (rem > 127) ? 127 : rem;   /* 单帧 HID 滚轮上限 127 */
         ble_hid_send_mouse_full_blocking(0, 0, (int8_t)(sign * step), 0);
         rem -= step;
     }
@@ -533,10 +532,7 @@ static void act_drag(void)
 
     /* 松开左键 */
     mouse_button(0);
-    /* 鼠标复位 */
-    if (!action_mouse_home()) {
-        goto exit_release;
-    }
+    /* 注：动作结束时不再复位鼠标（复位仅在“滑动鼠标”动作开始前执行一次） */
     /* 动作自带随机延迟 */
     action_delay_ms(rand_range(T->drag_end_delay_min, T->drag_end_delay_max));
 
@@ -572,9 +568,7 @@ static void act_click(void)
         }
     }
 
-    if (!action_mouse_home()) {
-        goto exit_release;
-    }
+    /* 注：动作结束时不再复位鼠标（复位仅在“滑动鼠标”动作开始前执行一次） */
     action_delay_ms(rand_range(T->click_end_delay_min, T->click_end_delay_max));
 
 exit_release:
@@ -603,7 +597,7 @@ static void act_wheel(void)
         int tick = rand_range(T->wheel_tick_min, T->wheel_tick_max);
         int delta = dir * tick;
         wheel_sum += delta;
-        mouse_wheel((int8_t)delta);
+        mouse_wheel(delta);
 
         /* 3) 间隔后进入下一轮（移动+滚轮） */
         if (!action_delay_ms(rand_range(T->wheel_interval_min, T->wheel_interval_max))) {
@@ -613,12 +607,10 @@ static void act_wheel(void)
 
     /* 滚轮归位：累计和精确归零 */
     if (wheel_sum != 0) {
-        mouse_wheel((int8_t)(-wheel_sum));
+        mouse_wheel(-wheel_sum);
     }
 
-    if (!action_mouse_home()) {
-        goto exit_release;
-    }
+    /* 注：动作结束时不再复位鼠标（复位仅在“滑动鼠标”动作开始前执行一次） */
     action_delay_ms(rand_range(T->wheel_end_delay_min, T->wheel_end_delay_max));
 
 exit_release:
@@ -698,31 +690,32 @@ static void act_word(void)
 
     for (int r = 0; r < repeat; r++) {
         action_engine_tick_progress();
-        /* 随机选一个词的起始下标（按词序计数） */
+        /* 随机选一个词（按词序 0..word_cnt-1），再取其起止位置。
+         * 注意：词序号 widx 以 0 为基（第一个词=0），与 pick 直接比较，避免下标偏移。 */
         int pick = rand_range(0, word_cnt - 1);
-        const char *p = list;
-        int idx = 0;
-        in_word = false;
         const char *wstart = NULL;
         int wlen = 0;
-        while (*p) {
-            if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
-                if (in_word) { /* 词结束 */
-                    if (idx == pick) { wlen = (int)(p - wstart); break; }
-                    in_word = false;
-                }
-            } else {
-                if (!in_word) { in_word = true; wstart = p; if (idx == pick) { /* 开始记录 */ } idx++; }
-                else if (idx - 1 == pick) { /* 继续记录当前词 */ }
+        int widx = -1;      /* 当前词的 0 基序号 */
+        in_word = false;
+        for (const char *q = list; ; ++q) {
+            bool sep = (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r' || *q == '\0');
+            if (!sep) {
+                if (!in_word) { in_word = true; wstart = q; widx++; }
+                continue;
             }
-            p++;
-        }
-        /* 处理最后一个词（文件末尾无空格结尾的情况） */
-        if (wlen == 0 && in_word && idx - 1 == pick) {
-            wlen = (int)(p - wstart);
+            if (in_word) {                      /* 一个词刚结束 */
+                if (widx == pick) {
+                    wlen = (int)(q - wstart);
+                    break;
+                }
+                in_word = false;
+            }
+            if (*q == '\0') {
+                break;                          /* 文本结束 */
+            }
         }
         if (wlen <= 0 || wstart == NULL) {
-            continue;
+            continue;   /* 理论不会发生（pick 已在有效范围内） */
         }
 
         /* 逐字符发送该词 */
@@ -799,10 +792,12 @@ void action_engine_reset_text_cursor(void)
 }
 
 /* 动作9：写文本（长文本逐字符输出）
- * - 先前置定位：连发 TEXT_PRE_PAGEDOWN_COUNT 个 PageDown，再发一次 End，
+ * - 先前置定位：连发 text_pre_pagedown_count 次 PageDown（不再发 End），
  *   把目标文档光标移到末尾（每轮都做），确保新内容追加在文末；
  * - 每轮从 text_char_limit_min~max 随机取一个“本轮输出字符数上限” N；
  * - 从 s_text_cursor 起的文本逐字节转 HID 发送（\n→Enter，\t→Tab，\r 跳过）；
+ * - 若 text_skip_line_indent=1：回车后、出现首个非空白字符前的空格/制表符不发送，
+ *   以规避 VSCode 等编辑器“回车自动缩进”导致的重复缩进；
  * - 累计输出达 N 且未到末尾：保存游标并结束本轮（下次从该处继续）；
  * - 输出到文本末尾：本轮完成，游标归零（下次从头开始）。
  */
@@ -820,9 +815,16 @@ static void act_text(void)
         s_text_cursor = 0;
     }
 
-    /* 前置定位：连发若干个 PageDown 再发一次 End，把光标移到文档末尾。
-     * 每轮写文本前都执行一次，保证本轮输出追加在文档最后。 */
-    for (int p = 0; p < TEXT_PRE_PAGEDOWN_COUNT; p++) {
+    /* 前置定位：连发 text_pre_pagedown_count 次 PageDown 把光标移到文档末尾（不再发 End）。
+     * 次数可在 Web 配置页「写文本」时间组中设置，默认 16；每轮写文本前都执行一次。 */
+    int pd_count = T->text_pre_pagedown_count;
+    if (pd_count < 0) {
+        pd_count = 0;
+    }
+    if (pd_count > 1000) {
+        pd_count = 1000;
+    }
+    for (int p = 0; p < pd_count; p++) {
         ble_hid_send_key(HID_KEY_PAGE_DOWN, true);
         if (!action_delay_ms(TEXT_PRE_KEY_HOLD_MS)) {
             goto exit_release;
@@ -831,14 +833,6 @@ static void act_text(void)
         if (!action_delay_ms(TEXT_PRE_KEY_GAP_MS)) {
             goto exit_release;
         }
-    }
-    ble_hid_send_key(HID_KEY_END, true);
-    if (!action_delay_ms(TEXT_PRE_KEY_HOLD_MS)) {
-        goto exit_release;
-    }
-    ble_hid_send_key(HID_KEY_END, false);
-    if (!action_delay_ms(TEXT_PRE_KEY_GAP_MS)) {
-        goto exit_release;
     }
 
     int limit = rand_range(T->text_char_limit_min, T->text_char_limit_max);
@@ -850,14 +844,33 @@ static void act_text(void)
              (unsigned)i, limit, (unsigned)len);
     action_engine_set_progress_total(limit);
 
+    /* 是否屏蔽“回车后的行首空格/制表符”（规避 VSCode 等编辑器自动缩进导致的重复缩进） */
+    const bool skip_indent = (T->text_skip_line_indent != 0);
+    bool line_start = false;   /* 上一次输出的是换行 → 当前位于行首 */
+
     for (; i < len; i++) {
         char c = text[i];
         if (c == '\r') {
             continue;   /* 换行已规范为 \n，残留 \r 直接跳过，避免重复回车 */
         }
+        /* 回车后、出现首个非空白字符前：屏蔽行首空格/制表符（不发送） */
+        if (skip_indent && line_start && (c == ' ' || c == '\t')) {
+            n++;
+            action_engine_tick_progress();
+            if (n >= limit) {
+                s_text_cursor = i + 1;
+                goto done;
+            }
+            continue;
+        }
+        line_start = false;
+
         ble_hid_send_char(c);
         n++;
         action_engine_tick_progress();
+        if (c == '\n') {
+            line_start = true;   /* 下一字符处于行首（可能被自动缩进） */
+        }
 
         uint32_t delay = (c == '\n')
             ? (uint32_t)rand_range(T->text_line_delay_min, T->text_line_delay_max)
@@ -960,9 +973,7 @@ static void act_move(void)
         }
     }
 
-    if (!action_mouse_home()) {
-        goto exit_release;
-    }
+    /* 注：动作结束时不再复位鼠标；本动作(滑动鼠标)的复位在其开始前由主循环执行 */
     action_delay_ms(rand_range(T->move_end_delay_min, T->move_end_delay_max));
 
 exit_release:
@@ -1073,7 +1084,11 @@ void action_engine_trigger_sequence_once(void)
         if (!ble_hid_is_connected()) {
             break;   /* 中途断连则停止本轮剩余动作 */
         }
-        exec_action_by_id(seq_action_at(i));
+        uint8_t a = seq_action_at(i);
+        if (a == ACT_MOVE && !action_mouse_home()) {
+            break;   /* 复位被中断：结束本轮 */
+        }
+        exec_action_by_id(a);
     }
 }
 
@@ -1085,6 +1100,10 @@ void action_engine_run_single(uint8_t action_id)
         return;
     }
     ESP_LOGI(TAG, "[定时单动作] 执行 action_id=%d", action_id);
+    if (action_id == ACT_MOVE && !action_mouse_home()) {
+        ESP_LOGW(TAG, "复位被中断，跳过本次滑动鼠标");
+        return;
+    }
     exec_action_by_id(action_id);
 }
 
@@ -1129,19 +1148,19 @@ static void action_engine_task(void *arg)
             continue;
         }
 
-        /* 动作开始前先鼠标归位，确保从屏幕中心出发（被中断则释放并退出本轮） */
-        if (!action_mouse_home()) {
-            action_release_all();
-            continue;
-        }
-
-        /* 抽取并执行一个动作（按运行模式分支） */
+        /* 抽取并执行一个动作（按运行模式分支）。
+         * 复位规则：仅“滑动鼠标(ACT_MOVE)”动作开始前执行一次鼠标复位，
+         * 其余动作（含休息）均不做鼠标复位。 */
         if (s_run_mode == RUN_MODE_SEQUENCE) {
             uint8_t n = (s_sequence.count > ACT_SEQ_MAX) ? ACT_SEQ_MAX : s_sequence.count;
             if (n == 0) {
                 exec_action_by_id(ACT_REST);   /* 序列为空：退化为休息，避免空转 */
             } else {
                 uint8_t act = seq_action_at(s_seq_cursor);
+                if (act == ACT_MOVE && !action_mouse_home()) {
+                    action_release_all();
+                    continue;   /* 被中断：不推进游标，下轮重试 */
+                }
                 exec_action_by_id(act);
                 s_seq_cursor++;
                 if (s_seq_cursor >= n) {
@@ -1163,6 +1182,10 @@ static void action_engine_task(void *arg)
             }
         } else {
             action_id_t act = pick_action();
+            if (act == ACT_MOVE && !action_mouse_home()) {
+                action_release_all();
+                continue;
+            }
             exec_action_by_id((uint8_t)act);
         }
 

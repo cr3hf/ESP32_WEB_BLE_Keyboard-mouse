@@ -108,6 +108,8 @@ static void cfg_default_timing(action_timing_t *t)
     t->text_line_delay_min = 80;   t->text_line_delay_max = 600;
     t->text_end_delay_min = 500;   t->text_end_delay_max = 2000;
     t->text_char_limit_min = 1000; t->text_char_limit_max = 5000;
+    t->text_pre_pagedown_count = 16;   /* 写文本前先发 PageDown 的次数（默认 16，仅 PageDown，不再发 End） */
+    t->text_skip_line_indent = 0;      /* 默认不屏蔽行首空格（需要时在页面开启） */
 }
 
 /* 默认运动模式（取自 action_engine.h 原宏默认值） */

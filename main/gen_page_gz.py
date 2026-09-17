@@ -3,26 +3,20 @@
 """
 构建期把 web_server.c 里的内嵌页面 PAGE_HTML 抽取出来并 gzip 压缩，生成 page_html_gz.h。
 
-为什么要做：整页约 65KB，弱网（AP 信号差 / BLE 共存）下单单页发送就容易触发
+为什么要做：整页约 74KB，弱网（AP 信号差 / BLE 共存）下单页发送容易触发
 httpd sock EAGAIN → send 超时 → uri handler execution failed，页面加载失败。
-压缩后通常降到 ~15KB，显著降低传输时间与失败率。
+压缩后通常降到 ~22KB，显著降低传输时间与失败率。
 
-做法：
-- 逐行解析 PAGE_HTML 的字符串字面量片段，遇到 `" APP_TITLE "` 之类的宏时用
-  defaults.h / local_defs.h 里的取值替换（只需 APP_TITLE、EXPORT_FILE_PREFIX）。
-- 用标准库 gzip 压缩（mtime=0，保证可复现），输出 C 头文件：
-    #define PAGE_HTML_GZ_LEN <n>
-    static const unsigned char PAGE_HTML_GZ[] = { ... };
+说明：PAGE_HTML 现在是**纯静态**内容（品牌/导出前缀等已改为运行期由 /api/brand 下发），
+因此这里只做“字符串字面量拼接 + 反转义 + gzip”，不再需要解析任何 C 宏。
 
+用法：gen_page_gz.py <web_server.c> <输出 page_html_gz.h>
 健壮性：任何解析/读写异常都会退化为“空压缩体”（PAGE_HTML_GZ_LEN=0），
 web_server.c 检测到 0 时自动回退发送未压缩页面，绝不导致构建失败。
-
-用法：gen_page_gz.py <web_server.c> <defaults.h> <local_defs.h|不存在> <输出 page_html_gz.h>
 """
 import gzip
 import io
 import os
-import re
 import sys
 
 
@@ -65,23 +59,8 @@ def c_unescape(s: str) -> str:
     return ''.join(out)
 
 
-def read_macro(path: str, name: str):
-    """从 C 头文件中读取 `#define NAME "..."` 的字符串值；找不到返回 None。"""
-    if not path or not os.path.isfile(path):
-        return None
-    try:
-        with open(path, 'r', encoding='utf-8', errors='replace') as f:
-            text = f.read()
-    except Exception:
-        return None
-    m = re.search(r'#\s*define\s+' + re.escape(name) + r'\s+"((?:[^"\\]|\\.)*)"', text)
-    if not m:
-        return None
-    return c_unescape(m.group(1))
-
-
 def tokenize_fragment(line: str):
-    """把一行 C 拼接片段解析为 [('str', raw), ('id', name), ...]。"""
+    """把一行 C 拼接片段解析为字符串字面量列表（'id' 表示引号外的标识符）。"""
     tokens = []
     i = 0
     n = len(line)
@@ -105,25 +84,22 @@ def tokenize_fragment(line: str):
                 j += 1
             tokens.append(('id', line[i:j]))
             i = j
+        elif c == '/' and i + 1 < n and line[i + 1] in '/*':
+            break   # 行尾 C 注释（// 或 /*），忽略其后内容
         else:
             i += 1
     return tokens
 
 
 def main() -> int:
-    if len(sys.argv) != 5:
-        sys.stderr.write('用法: gen_page_gz.py <web_server.c> <defaults.h> <local_defs.h> <out.h>\n')
+    if len(sys.argv) != 3:
+        sys.stderr.write('用法: gen_page_gz.py <web_server.c> <out.h>\n')
         return 1
-    csrc, dflt, local, out_path = sys.argv[1:5]
+    csrc, out_path = sys.argv[1], sys.argv[2]
 
     gz_bytes = b''
     plain_len = 0
     try:
-        # 宏取值：local_defs.h 优先，其次 defaults.h
-        title = read_macro(local, 'APP_TITLE') or read_macro(dflt, 'APP_TITLE') or 'BLE_KM'
-        prefix = read_macro(local, 'EXPORT_FILE_PREFIX') or read_macro(dflt, 'EXPORT_FILE_PREFIX') or 'ble_km-config'
-        macros = {'APP_TITLE': title, 'EXPORT_FILE_PREFIX': prefix}
-
         with open(csrc, 'r', encoding='utf-8', errors='replace') as f:
             lines = f.readlines()
         start = None
@@ -145,7 +121,8 @@ def main() -> int:
                 if kind == 'str':
                     chunks.append(c_unescape(val))
                 else:
-                    chunks.append(macros.get(val, ''))   # 未知宏按空串处理
+                    # 页面应为纯静态：若出现引号外的标识符（宏），说明其未被替换，给出告警。
+                    sys.stderr.write('警告：PAGE_HTML 中出现未替换的标识符 "%s"\n' % val)
         content = ''.join(chunks)
         plain_len = len(content.encode('utf-8'))
 

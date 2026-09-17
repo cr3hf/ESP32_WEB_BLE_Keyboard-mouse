@@ -175,6 +175,8 @@ typedef struct {
     int text_line_delay_min, text_line_delay_max;       /* 换行处的延迟（ms） */
     int text_end_delay_min, text_end_delay_max;         /* 动作结束后的休息时间（ms） */
     int text_char_limit_min, text_char_limit_max;       /* 每轮输出字符数上下限（随机） */
+    int text_pre_pagedown_count;                        /* 写文本前先发 PageDown 的次数（把光标移到文末） */
+    int text_skip_line_indent;                          /* 1=回车后屏蔽行首空格/制表符（规避编辑器自动缩进）；0=不屏蔽 */
 } action_timing_t;
 
 /* ---------------- 运动模式参数（Web 可配；随 3 套参数各自独立） ----------------
@@ -227,9 +229,13 @@ typedef struct {
  *        每轮字符数上下限）。长文本本身存于独立 Flash 分区（见 text_store），不进本结构。
  *   14 —— “休息”动作时间单位改为 ×100ms（如 60 = 6 秒）；rest_delay_min/max 语义变更，
  *        默认值相应改为 10 / 200（即 1s / 20s）。
+ *   15 —— “写文本”前置定位改为仅发 PageDown（去掉 End），次数提为可配字段
+ *        timing.text_pre_pagedown_count（默认 16）。
+ *   16 —— “写文本”新增开关 timing.text_skip_line_indent（默认 0）：
+ *        开启后回车之后的行首空格/制表符不发送，规避 VSCode 等编辑器自动缩进造成的重复缩进。
  * 约定：旧配置与新布局不兼容时统一重置为默认（会清空 WiFi 凭据等，需重新在页面配置）。
  */
-#define CFG_VERSION  14
+#define CFG_VERSION  16
 typedef struct {
     uint32_t        version;            /* 结构版本，便于后续扩展兼容 */
     uint8_t         active_profile;     /* 当前生效的参数套序号 0~(PROFILE_COUNT-1)（选择即生效，其余套只保存不生效） */

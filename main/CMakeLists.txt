@@ -36,20 +36,13 @@ add_dependencies(${COMPONENT_LIB} default_text_gen)
 # 构建期把 web_server.c 的内嵌页面 PAGE_HTML gzip 压缩，生成 page_html_gz.h
 # （web_server.c 在浏览器支持 gzip 时发送压缩页面，整页 72KB → 约 21KB，弱网更易加载成功）。
 set(PAGE_GZ_H ${CMAKE_CURRENT_SOURCE_DIR}/page_html_gz.h)
-set(PAGE_GZ_DEPS ${CMAKE_CURRENT_SOURCE_DIR}/gen_page_gz.py
-                 ${CMAKE_CURRENT_SOURCE_DIR}/web_server.c
-                 ${CMAKE_CURRENT_SOURCE_DIR}/defaults.h)
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/local_defs.h)
-  list(APPEND PAGE_GZ_DEPS ${CMAKE_CURRENT_SOURCE_DIR}/local_defs.h)
-endif()
 add_custom_command(
   OUTPUT  ${PAGE_GZ_H}
   COMMAND ${idf_python} ${CMAKE_CURRENT_SOURCE_DIR}/gen_page_gz.py
           ${CMAKE_CURRENT_SOURCE_DIR}/web_server.c
-          ${CMAKE_CURRENT_SOURCE_DIR}/defaults.h
-          ${CMAKE_CURRENT_SOURCE_DIR}/local_defs.h
           ${PAGE_GZ_H}
-  DEPENDS ${PAGE_GZ_DEPS}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_page_gz.py
+          ${CMAKE_CURRENT_SOURCE_DIR}/web_server.c
   COMMENT "生成内嵌页面 gzip 资源 page_html_gz.h"
   VERBATIM)
 add_custom_target(page_gz_gen DEPENDS ${PAGE_GZ_H})

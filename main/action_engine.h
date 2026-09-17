@@ -190,10 +190,12 @@ extern "C" {
 #define ALT_TAB_HOLD_MS         10      /* ms：Tab 按下保持时长（与方向键一致） */
 
 /* ---------------- 动作9：写文本 前置定位参数 ----------------
- * 每次执行「写文本」前，先连续发送若干个 PageDown、再发送一次 End，
- * 把目标文档的光标定位到末尾，然后再逐字符追加输出文本。 */
+ * 每次执行「写文本」前，先连续发送若干次 PageDown（不再发 End），把目标文档光标
+ * 定位到末尾，然后再逐字符追加输出文本。
+ * PageDown 次数已提为可配字段 timing.text_pre_pagedown_count（Web 页面可改，默认 16）；
+ * 下面的宏仅作默认值参考，不再被代码直接引用。 */
 #ifndef TEXT_PRE_PAGEDOWN_COUNT
-#define TEXT_PRE_PAGEDOWN_COUNT 16      /* 次：前置 PageDown 次数 */
+#define TEXT_PRE_PAGEDOWN_COUNT 16      /* 默认参考值：前置 PageDown 次数 */
 #endif
 #ifndef TEXT_PRE_KEY_HOLD_MS
 #define TEXT_PRE_KEY_HOLD_MS    10      /* ms：PageDown/End 按下保持时长 */
