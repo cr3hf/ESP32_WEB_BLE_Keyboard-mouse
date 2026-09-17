@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "esp_err.h"
 
@@ -159,6 +160,12 @@ extern "C" {
  * 单位 ×100ms（如 60 = 6 秒），故 10/200 = 1s/20s。 */
 #define REST_DELAY_MIN      10      /* 单位 ×100ms */
 #define REST_DELAY_MAX      200     /* 单位 ×100ms */
+
+/* 休息分段等待粒度(ms)：休息期间按此粒度累计连续休息时长，
+ * 一旦达到 rest_max_total_sec 上限即“立即打断”本次休息（无需等本次休息走完）。 */
+#ifndef REST_SLICE_MS
+#define REST_SLICE_MS       100
+#endif
 
 /* ---------------- 动作8：切换程序（Alt+Tab）参数 ----------------
  * - 切换次数（默认 0~1 次）：0=本次不切换程序，1=切换一次。
@@ -363,6 +370,24 @@ esp_err_t action_engine_start_scheduler(void);
  * 避免游标指向修改后的越界位置。
  */
 void action_engine_reset_text_cursor(void);
+
+/**
+ * @brief 返回“写文本”动作当前的输出位置（文本字节下标），供 /api/status 在状态栏展示。
+ *        0 = 在开头（或未开始）；等于文本长度 = 已输出到末尾（下次会从头）。
+ */
+size_t action_engine_text_cursor(void);
+
+/**
+ * @brief 手动设置“写文本”的输出起始位置（即续写游标），供页面「起始文档位置」使用。
+ *
+ * 与 action_engine_text_cursor() 同源，均为**内存值，不持久化**：
+ * 设置后下次执行“写文本”从该字节位置开始输出；重启/重新上电后恢复为 0。
+ * 不影响正在执行的那一轮输出（本轮起点已在动作开始时确定）。
+ *
+ * @param pos 文本字节下标；超过文本长度时按文本长度处理
+ *            （等于文本长度则下次会按“已到末尾”从头开始）
+ */
+void action_engine_set_text_cursor(size_t pos);
 
 #ifdef __cplusplus
 }

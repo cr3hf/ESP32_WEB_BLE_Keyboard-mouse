@@ -81,6 +81,7 @@ static void cfg_default_timing(action_timing_t *t)
     t->arrow_end_delay_min = 1000; t->arrow_end_delay_max = 5000;
     /* 休息: REST_DELAY_*（单位 ×100ms，故 10/200 = 1s/20s） */
     t->rest_delay_min = 10;   t->rest_delay_max = 200;
+    t->rest_max_total_sec = 540;   /* 连续休息累计上限：9 分钟（0=不限） */
     /* 滑动鼠标: 位移距离 + 分片步进 + 次数 + 间隔 + 结束延迟 */
     t->move_repeat_min = 1;   t->move_repeat_max = 20;
     t->move_distance_min = 10; t->move_distance_max = 30;       /* 单次滑动总位移（逻辑像素） */

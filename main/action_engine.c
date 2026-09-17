@@ -154,6 +154,10 @@ static uint8_t          s_seq_shuffle[ACT_SEQ_MAX];   /* 洗牌用临时游标�
 static uint8_t          s_seq_shuffle_len = 0;        /* 当前轮洗牌长度 */
 static bool             s_seq_once_stop = false;      /* 单次循环：一轮执行完自动停止标记 */
 
+/* 连续休息累计时长(ms)：执行“非休息”动作时清零；累计超过 rest_max_total_sec 后，
+ * 若再抽到休息则强制改执行一个随机的非休息动作，避免系统长时间休息。 */
+static int64_t          s_consec_rest_ms = 0;
+
 /* 清零运行额度计时器：停止/重置时调用，避免残留额度导致下次启动即停。 */
 static void reset_runtime(void)
 {
@@ -791,6 +795,28 @@ void action_engine_reset_text_cursor(void)
     ESP_LOGI(TAG, "写文本游标已复位，下次从头输出");
 }
 
+size_t action_engine_text_cursor(void)
+{
+    return s_text_cursor;
+}
+
+/* 手动设置写文本的输出起始位置（仅内存，不持久化）。
+ * 供页面「起始文档位置」调用：设置后下次执行本动作从该字节开始输出；
+ * 不影响本轮正在执行的输出（本轮起点已在 act_text() 开头确定）。 */
+void action_engine_set_text_cursor(size_t pos)
+{
+    size_t len = text_store_len();
+    if (pos > len) {
+        pos = len;   /* 越界保护：超过文本长度按文本长度处理 */
+    }
+    s_text_cursor = pos;
+    ESP_LOGI(TAG, "写文本起始位置已设为 %u（文本长度 %u，仅本次运行有效）",
+             (unsigned)pos, (unsigned)len);
+    if (len > 0 && pos >= len) {
+        ESP_LOGW(TAG, "起始位置已到文本末尾，下次写文本将从头开始");
+    }
+}
+
 /* 动作9：写文本（长文本逐字符输出）
  * - 先前置定位：连发 text_pre_pagedown_count 次 PageDown（不再发 End），
  *   把目标文档光标移到末尾（每轮都做），确保新内容追加在文末；
@@ -798,7 +824,8 @@ void action_engine_reset_text_cursor(void)
  * - 从 s_text_cursor 起的文本逐字节转 HID 发送（\n→Enter，\t→Tab，\r 跳过）；
  * - 若 text_skip_line_indent=1：回车后、出现首个非空白字符前的空格/制表符不发送，
  *   以规避 VSCode 等编辑器“回车自动缩进”导致的重复缩进；
- * - 累计输出达 N 且未到末尾：保存游标并结束本轮（下次从该处继续）；
+ * - 累计输出达 N 后不立即停止：继续补完“当前这一行”（直到换行或文本末尾）才结束本轮，
+ *   避免把一行文字截断在中间；下次从该处继续；
  * - 输出到文本末尾：本轮完成，游标归零（下次从头开始）。
  */
 static void act_text(void)
@@ -847,6 +874,7 @@ static void act_text(void)
     /* 是否屏蔽“回车后的行首空格/制表符”（规避 VSCode 等编辑器自动缩进导致的重复缩进） */
     const bool skip_indent = (T->text_skip_line_indent != 0);
     bool line_start = false;   /* 上一次输出的是换行 → 当前位于行首 */
+    bool finishing  = false;   /* 已达本轮上限，正在补完当前行（到换行为止） */
 
     for (; i < len; i++) {
         char c = text[i];
@@ -857,9 +885,9 @@ static void act_text(void)
         if (skip_indent && line_start && (c == ' ' || c == '\t')) {
             n++;
             action_engine_tick_progress();
-            if (n >= limit) {
-                s_text_cursor = i + 1;
-                goto done;
+            /* 已达上限也要把本行补完，故此处只标记 finishing，不结束本轮 */
+            if (!finishing && n >= limit) {
+                finishing = true;
             }
             continue;
         }
@@ -868,11 +896,12 @@ static void act_text(void)
         ble_hid_send_char(c);
         n++;
         action_engine_tick_progress();
-        if (c == '\n') {
+        bool is_nl = (c == '\n');
+        if (is_nl) {
             line_start = true;   /* 下一字符处于行首（可能被自动缩进） */
         }
 
-        uint32_t delay = (c == '\n')
+        uint32_t delay = is_nl
             ? (uint32_t)rand_range(T->text_line_delay_min, T->text_line_delay_max)
             : (uint32_t)rand_range(T->text_char_delay_min, T->text_char_delay_max);
         if (!action_delay_ms(delay)) {
@@ -881,8 +910,17 @@ static void act_text(void)
             goto exit_release;
         }
 
-        if (n >= limit) {
-            /* 达到本轮上限：保存游标，结束本轮（下次继续） */
+        if (!finishing && n >= limit) {
+            finishing = true;
+            if (is_nl) {
+                /* 上限恰好落在行尾：本行已完整输出，本轮结束 */
+                s_text_cursor = i + 1;
+                goto done;
+            }
+            ESP_LOGI(TAG, "[动作] 写文本：已达本轮上限(%d)，补完当前行后结束", limit);
+        }
+        if (finishing && is_nl) {
+            /* 补完当前行（到换行为止），本轮结束；下次从此处继续 */
             s_text_cursor = i + 1;
             goto done;
         }
@@ -909,9 +947,50 @@ static void act_rest(void)
     }
     uint32_t delay_ms = (uint32_t)units * 100u;
     ESP_LOGI(TAG, "[动作] 休息 %d 单位(×100ms) = %u ms", units, (unsigned)delay_ms);
-    s_rest_end_us = esp_timer_get_time() + (int64_t)delay_ms * 1000;
-    action_delay_ms(delay_ms);
+
+    /* 连续休息上限（秒，0=不限）：超过后本次休息立即被打断，交由主循环改执行非休息动作 */
+    const int cap_sec = T->rest_max_total_sec;
+    const int64_t cap_ms = (cap_sec > 0) ? (int64_t)cap_sec * 1000 : 0;
+
+    /* 分段等待（粒度 REST_SLICE_MS），每段后累计并检查上限，实现“超限立即打断”。
+     * 累计使用实测等待时长（esp_timer），被 STOP/断连中断时不会多计。 */
+    uint32_t remaining = delay_ms;
+    bool interrupted = false;
+    bool cap_hit = false;
+    s_rest_end_us = esp_timer_get_time() + (int64_t)remaining * 1000;
+
+    while (remaining > 0) {
+        uint32_t slice = (remaining > REST_SLICE_MS) ? REST_SLICE_MS : remaining;
+        int64_t t0 = esp_timer_get_time();
+        bool ok = action_delay_ms(slice);
+        int64_t waited_ms = (esp_timer_get_time() - t0) / 1000;
+        if (waited_ms < 0) {
+            waited_ms = 0;
+        }
+        if (waited_ms > (int64_t)slice) {
+            waited_ms = (int64_t)slice;   /* 理论上不会超，做个上限保护 */
+        }
+        s_consec_rest_ms += waited_ms;
+        remaining -= slice;
+        s_rest_end_us = (remaining > 0) ? (esp_timer_get_time() + (int64_t)remaining * 1000) : 0;
+
+        if (!ok) {
+            interrupted = true;   /* 被 STOP/断连打断：按已等待时长累计后退出 */
+            break;
+        }
+        if (cap_ms > 0 && s_consec_rest_ms >= cap_ms && remaining > 0) {
+            cap_hit = true;
+            ESP_LOGW(TAG, "[连续休息限制] 累计 %lld ms ≥ 上限 %d 秒，立即打断本次休息（剩余 %u ms 未休完）",
+                     (long long)s_consec_rest_ms, cap_sec, (unsigned)remaining);
+            break;
+        }
+    }
     s_rest_end_us = 0;
+
+    ESP_LOGI(TAG, "[动作] 连续休息累计 = %lld ms%s%s",
+             (long long)s_consec_rest_ms,
+             cap_hit ? "（已超限打断）" : "",
+             interrupted ? "（被停止/断连打断）" : "");
     action_release_all();
 }
 
@@ -1010,11 +1089,71 @@ static action_id_t pick_action(void)
     return ACT_REST;
 }
 
+/* 在“非休息”动作中按权重随机抽一个（用于连续休息超限时强制打断休息）。
+ * 若所有非休息动作权重均为 0，则回退为“滑动鼠标”，确保不会无限休息。 */
+static action_id_t pick_non_rest_action(void)
+{
+    int weights[ACT_COUNT] = {
+        s_weights.drag, s_weights.click, s_weights.wheel,
+        s_weights.arrow, 0 /* 休息排除 */, s_weights.move, s_weights.word,
+        s_weights.alt_tab, s_weights.text,
+    };
+    int total = 0;
+    for (int i = 0; i < ACT_COUNT; i++) {
+        if (weights[i] < 0) {
+            weights[i] = 0;
+        }
+        total += weights[i];
+    }
+    if (total <= 0) {
+        ESP_LOGW(TAG, "非休息动作权重全为 0，强制使用滑动鼠标以打断连续休息");
+        return ACT_MOVE;
+    }
+    int r = (int)(esp_random() % (uint32_t)total);
+    int acc = 0;
+    for (int i = 0; i < ACT_COUNT; i++) {
+        if (i == ACT_REST) {
+            continue;
+        }
+        acc += weights[i];
+        if (r < acc) {
+            return (action_id_t)i;
+        }
+    }
+    return ACT_MOVE;
+}
+
+/* 应用“连续休息上限”：若拟执行的动作是休息、且连续休息累计已超上限，
+ * 则改为随机取一个非休息动作并返回；否则原样返回。
+ * 上限值为 0（或负）表示不限制。 */
+static action_id_t apply_rest_cap(action_id_t act)
+{
+    if (act != ACT_REST) {
+        return act;
+    }
+    int cap_sec = ae_timing()->rest_max_total_sec;
+    if (cap_sec <= 0) {
+        return act;   /* 未启用限制 */
+    }
+    if (s_consec_rest_ms < (int64_t)cap_sec * 1000) {
+        return act;   /* 未达上限，允许继续休息 */
+    }
+    action_id_t forced = pick_non_rest_action();
+    ESP_LOGW(TAG, "[连续休息限制] 已累计连续休息 %lld ms（上限 %d 秒），强制改执行动作 %d",
+             (long long)s_consec_rest_ms, cap_sec, (int)forced);
+    return forced;
+}
+
 /* 按 action_id 执行对应动作原语（序列模式 / 单动作 / 周期复用） */
 static void exec_action_by_id(uint8_t action_id)
 {
     /* 记录当前动作（用于 Web 状态页展示） */
     action_engine_set_current_action((act_id_t)action_id);
+
+    /* 执行“非休息”动作 → 清零连续休息计时（连续休息上限的判定依据） */
+    if (action_id != ACT_REST) {
+        s_consec_rest_ms = 0;
+    }
 
     switch (action_id) {
     case ACT_DRAG:   act_drag();       break;
@@ -1085,6 +1224,7 @@ void action_engine_trigger_sequence_once(void)
             break;   /* 中途断连则停止本轮剩余动作 */
         }
         uint8_t a = seq_action_at(i);
+        a = (uint8_t)apply_rest_cap((action_id_t)a);   /* 连续休息超限则强制改动作 */
         if (a == ACT_MOVE && !action_mouse_home()) {
             break;   /* 复位被中断：结束本轮 */
         }
@@ -1100,6 +1240,7 @@ void action_engine_run_single(uint8_t action_id)
         return;
     }
     ESP_LOGI(TAG, "[定时单动作] 执行 action_id=%d", action_id);
+    action_id = (uint8_t)apply_rest_cap((action_id_t)action_id);   /* 连续休息超限则改为非休息动作 */
     if (action_id == ACT_MOVE && !action_mouse_home()) {
         ESP_LOGW(TAG, "复位被中断，跳过本次滑动鼠标");
         return;
@@ -1154,9 +1295,16 @@ static void action_engine_task(void *arg)
         if (s_run_mode == RUN_MODE_SEQUENCE) {
             uint8_t n = (s_sequence.count > ACT_SEQ_MAX) ? ACT_SEQ_MAX : s_sequence.count;
             if (n == 0) {
-                exec_action_by_id(ACT_REST);   /* 序列为空：退化为休息，避免空转 */
+                /* 序列为空：退化为休息，避免空转；连续休息超限则强制改执行非休息动作 */
+                action_id_t a0 = apply_rest_cap(ACT_REST);
+                if (a0 == ACT_MOVE && !action_mouse_home()) {
+                    action_release_all();
+                    continue;
+                }
+                exec_action_by_id((uint8_t)a0);
             } else {
                 uint8_t act = seq_action_at(s_seq_cursor);
+                act = (uint8_t)apply_rest_cap((action_id_t)act);   /* 连续休息超限则强制改动作 */
                 if (act == ACT_MOVE && !action_mouse_home()) {
                     action_release_all();
                     continue;   /* 被中断：不推进游标，下轮重试 */
@@ -1182,6 +1330,7 @@ static void action_engine_task(void *arg)
             }
         } else {
             action_id_t act = pick_action();
+            act = apply_rest_cap(act);   /* 连续休息超限则强制改抽非休息动作 */
             if (act == ACT_MOVE && !action_mouse_home()) {
                 action_release_all();
                 continue;

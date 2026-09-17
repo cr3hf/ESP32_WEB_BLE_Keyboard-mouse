@@ -340,7 +340,8 @@ static const char PAGE_HTML[] =
 "  fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:u.value.trim(),pass:p.value}),signal:ctl.signal})\n"
 "   .then(function(r){return r.json().catch(function(){return {};});})\n"
 "   .then(function(j){clearTimeout(to);if(j&&j.ok&&j.token){setTok(j.token);setMsg('登录成功',' ok');showPage();\n"
-"      if(window.__afterLogin){try{window.__afterLogin();}catch(e){console.error(e);}}else{location.reload();}}\n"
+"      if(window.__afterLogin){try{window.__afterLogin();}catch(e){console.error(e);}}\n"
+"      else{var _n=0,_iv=setInterval(function(){if(window.__afterLogin){clearInterval(_iv);try{window.__afterLogin();}catch(e){}}else if(++_n>40){clearInterval(_iv);}},250);}}\n"
 "    else{setMsg((j&&j.msg)||'登录失败',' err');}})\n"
 "   .catch(function(){clearTimeout(to);setMsg('网络错误或超时，请重试',' err');});}\n"
 "document.addEventListener('click',function(e){var el=e.target;\n"
@@ -469,6 +470,12 @@ static const char PAGE_HTML[] =
 "          <button class='btn ghost' id='text-copy-btn'>复制全文</button>\n"
 "          <button class='btn ghost' id='text-clear-btn'>清空</button>\n"
 "        </div>\n"
+"        <div style='display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:12px;padding-top:10px;border-top:1px solid rgba(148,163,184,.14)'>\n"
+"          <label style='color:var(--sub);font-size:12.5px'>起始文档位置</label>\n"
+"          <input type='number' id='text-start-pos' min='0' step='1' value='0' style='width:130px;padding:6px 8px;border:1px solid #ccc;border-radius:6px;font-size:13px'>\n"
+"          <button class='btn ghost' id='text-pos-btn'>设为起点</button>\n"
+"          <span style='color:var(--sub);font-size:12.5px'>字符下标（0 = 从头开始）；仅本次运行有效、不保存，可对照状态栏「文本位置」</span>\n"
+"        </div>\n"
 "      </div>\n"
 "    </div>\n"
 "    <div class='card' style='grid-column:1/-1'>\n"
@@ -570,6 +577,8 @@ static const char PAGE_HTML[] =
 "  <span class='state-val idle' id='cur-action'>空闲</span>\n"
 "  <span class='state-label'>版本</span>\n"
 "  <span class='state-val' id='ver'>—</span>\n"
+"  <span class='state-label'>文本位置</span>\n"
+"  <span class='state-val' id='text-pos' title='写文本动作的输出位置 / 文本总长'>—</span>\n"
 "  <button class='btn ghost' id='ota-btn' title='选择固件 .bin 上传升级'>升级固件</button>\n"
 "  <input type='file' id='ota-file' accept='.bin' style='display:none'>\n"
 "  <span id='ota-msg' style='color:var(--sub);font-size:13px'></span>\n"
@@ -578,7 +587,8 @@ static const char PAGE_HTML[] =
 "const ACT_NAMES=['拖拽','点击','滚轮','方向键','休息','滑动','打字','切换程序','写文本'];\n"
 "const ACT_KEYS =['drag','click','wheel','arrow','rest','move','word','alt_tab','text'];\n"
 "let cfg=null;\n"
-"let _cfgFailed=false;   /* 配置读取是否失败（用于触发一次自动重载） */\n"
+"let _posSynced=false;   /* 「起始文档位置」输入框是否已用设备当前游标初始化过（只同步一次） */\n"
+"let _cfgFailed=false;   /* 配置读取是否失败（失败时显示默认值并提示，不再自动重载页面） */\n"
 "let exportPrefix='ble_km-config';   /* 导出文件名前缀，由 /api/brand 下发（取自固件宏 EXPORT_FILE_PREFIX） */\n"
 "/* 安全绑定：元素不存在时跳过，避免单个缺失元素导致整个脚本崩溃（此前 reset-timing 缺失曾中断 loadAll） */\n"
 "/* ev 支持 'onclick'/'click' 等写法，统一规范为 'on'+事件名 作为元素属性赋值 */\n"
@@ -669,7 +679,7 @@ static const char PAGE_HTML[] =
 "  click_repeat_min:1,click_repeat_max:10,click_distance_min:10,click_distance_max:100,click_step_min:1,click_step_max:30,click_hold_min:20,click_hold_max:250,click_interval_min:100,click_interval_max:1000,click_end_delay_min:1000,click_end_delay_max:5000,\n"
 "  wheel_repeat_min:1,wheel_repeat_max:5,wheel_distance_min:10,wheel_distance_max:100,wheel_step_min:1,wheel_step_max:30,wheel_tick_min:1,wheel_tick_max:8,wheel_interval_min:100,wheel_interval_max:500,wheel_end_delay_min:1000,wheel_end_delay_max:5000,\n"
 "  arrow_repeat_min:1,arrow_repeat_max:20,arrow_interval_min:50,arrow_interval_max:800,arrow_end_delay_min:1000,arrow_end_delay_max:5000,\n"
-"  rest_delay_min:10,rest_delay_max:200,\n"
+"  rest_delay_min:10,rest_delay_max:200,rest_max_total_sec:540,\n"
 "  move_repeat_min:1,move_repeat_max:20,move_distance_min:10,move_distance_max:30,move_step_min:1,move_step_max:15,\n"
 "  move_interval_min:100,move_interval_max:500,move_end_delay_min:500,move_end_delay_max:1000,\n"
 "  led_blink_on_ms:80,led_freq_per_1min_ms:50,led_freq_max_ms:2000,led_blink_once_ms:200,led_blink_once_gap_ms:200,\n"
@@ -700,6 +710,12 @@ static const char PAGE_HTML[] =
 "      if(s.running && an==='休息' && s.rest_remaining>0){pr='（剩 '+Math.ceil(s.rest_remaining)+'s）';}\n"
 "      actEl.textContent=an+pr;\n"
 "      actEl.className='state-val'+(s.running?' running':' idle');}\n"
+"    const tpEl=document.getElementById('text-pos');\n"
+"    if(tpEl){tpEl.textContent=(s.text_len>0)?(s.text_pos+' / '+s.text_len):'—';}\n"
+"    /* 首次拿到状态时，用设备当前游标初始化「起始文档位置」输入框（仅一次，不打扰输入） */\n"
+"    if(!_posSynced && s.text_len>0){_posSynced=true;\n"
+"      const pe=document.getElementById('text-start-pos');\n"
+"      if(pe&&document.activeElement!==pe){pe.value=s.text_pos;}}\n"
 "  }catch(e){ /* 网络异常时保持当前显示，下次轮询重试 */ }\n"
 "  finally{_refreshing=false;}\n"
 "}\n"
@@ -1064,7 +1080,8 @@ static const char PAGE_HTML[] =
 "    ['动作间隔','arrow_interval_min','arrow_interval_max',50,5000],\n"
 "    ['结束延迟','arrow_end_delay_min','arrow_end_delay_max',50,60000]]},\n"
 "  {title:'休息',unit:'',rows:[\n"
-"    ['休息时长(×100ms，60=6秒)','rest_delay_min','rest_delay_max',1,36000]]},\n"
+"    ['休息时长(×100ms，60=6秒)','rest_delay_min','rest_delay_max',1,36000],\n"
+"    ['连续休息上限(秒，0=不限)','rest_max_total_sec',null,0,86400]]},\n"
 "  {title:'滑动',unit:'',rows:[\n"
 "    ['重复次数(次)','move_repeat_min','move_repeat_max',1,999],\n"
 "    ['移动距离(像素)','move_distance_min','move_distance_max',10,2000],\n"
@@ -1137,15 +1154,7 @@ static const char PAGE_HTML[] =
 "}\n"
 "/* 状态/实时时间轮询：1s 一次，页面切到后台时暂停，减少对 STA 连接的持续占用 */\n"
 "/* 登录门控：无有效 token 时只显示登录框，不加载配置/状态（查看与配置均受登录保护） */\n"
-"function afterLogin(){ loadAll().catch(function(e){console.error('loadAll',e);}); refreshStatus();\n"
-"  /* 加载看门狗：放宽到 5s（原 800ms 会早于 loadAll 的 3 次重试触发，导致反复整页重载），\n"
-"     且每个标签页最多自动重载一次，避免弱网下陷入“重载→再重载”循环；文本改为配置加载完成后再拉。 */\n"
-"  setTimeout(()=>{ const lm=document.getElementById('login-mask');\n"
-"    if(lm && !lm.classList.contains('hidden'))return;   /* 已在登录页：无需重载 */\n"
-"    if(cfg!==null && !_cfgFailed)return; const t=document.getElementById('toast');\n"
-"    if(t){t.textContent='页面加载不完整，正在重试…';t.classList.add('show');}\n"
-"    let once=false;try{once=!!sessionStorage.getItem('km_cfg_reload');sessionStorage.setItem('km_cfg_reload','1');}catch(e){once=true;}\n"
-"    if(!once)location.reload(); },5000); }\n"
+"function afterLogin(){ loadAll().catch(function(e){console.error('loadAll',e);}); refreshStatus(); }\n"
 "/* 供 <body> 顶部自包含登录脚本在登录成功后回调（揭示页面并加载数据） */\n"
 "window.__afterLogin=function(){hideLogin();afterLogin();};\n"
 "loadBrand();   /* 先取品牌/导出前缀（公开接口，无需登录），保证登录页标题与导出文件名前缀正确 */\n"
@@ -1210,6 +1219,7 @@ static const char PAGE_HTML[] =
 "    const r=await fetch('/api/text',{method:'POST',headers:hdr,body:s});\n"
 "    if(r.status===401){handleUnauth();return;}\n"
 "    let j={};try{j=await r.json();}catch(e){}\n"
+"    if(j.ok){const pe=document.getElementById('text-start-pos');if(pe)pe.value=0;}\n"
 "    toast(j.ok?('文本已保存（'+s.length+' 字符），下次从头输出'):('保存失败：'+(j.msg||r.status)));\n"
 "  }catch(e){toast('保存失败：网络错误');}\n"
 "  finally{if(btn)btn.disabled=false;}\n"
@@ -1248,6 +1258,22 @@ static const char PAGE_HTML[] =
 "});\n"
 "on('text-clear-btn','onclick',()=>{const el=document.getElementById('text-input');if(!el)return;\n"
 "  if(!confirm('确定清空文本框？（清空后需点「保存文本」才会写入设备）'))return;el.value='';_textLoaded=true;updateTextCount();});\n"
+"/* 起始文档位置：设置“写文本”的输出起点（仅内存，不保存） */\n"
+"on('text-pos-btn','onclick',async()=>{\n"
+"  const el=document.getElementById('text-start-pos');if(!el)return;\n"
+"  let pos=parseInt(el.value,10);if(isNaN(pos)||pos<0)pos=0;\n"
+"  const btn=document.getElementById('text-pos-btn');if(btn)btn.disabled=true;\n"
+"  try{\n"
+"    const tk=getToken();const hdr={'Content-Type':'application/json'};if(tk)hdr.Authorization='Bearer '+tk;\n"
+"    const r=await fetch('/api/text/cursor',{method:'POST',headers:hdr,body:JSON.stringify({pos:pos})});\n"
+"    if(r.status===401){handleUnauth();return;}\n"
+"    let j={};try{j=await r.json();}catch(e){}\n"
+"    if(j.ok){el.value=j.text_pos;\n"
+"      toast('起始位置已设为 '+j.text_pos+' / '+j.text_len+'（不保存；重启后从头开始）');}\n"
+"    else{toast('设置失败：'+(j.msg||r.status));}\n"
+"  }catch(e){toast('设置失败：网络错误');}\n"
+"  finally{if(btn)btn.disabled=false;}\n"
+"});\n"
 "on('text-input','input',updateTextCount);\n"
 "/* 长文本只在“文本卡片滚动进入可视区”时才读取：避免登录后立即传数十 KB，\n"
 "   长时间占住单线程 httpd 导致启停/保存等指令排队等待。 */\n"
@@ -1574,6 +1600,10 @@ static esp_err_t handler_status(httpd_req_t *req)
     int64_t rest_us = action_engine_current_rest_remaining_us();
     cJSON_AddNumberToObject(root, "rest_remaining", rest_us > 0 ? (double)(rest_us / 1000000LL) : 0);
 
+    /* “写文本”动作的当前输出位置与文本总长（供页面状态栏显示文本位置） */
+    cJSON_AddNumberToObject(root, "text_pos", (double)action_engine_text_cursor());
+    cJSON_AddNumberToObject(root, "text_len", (double)text_store_len());
+
     /* 当前板子时间（北京时间 UTC+8）+ 是否已联网校时 */
     char tbuf[24];
     wifi_manager_get_time_str(tbuf, sizeof(tbuf));
@@ -1691,6 +1721,7 @@ static void json_parse_timing(cJSON *tm, action_timing_t *t)
     TINT(text_char_limit_min); TINT(text_char_limit_max);
     TINT(text_pre_pagedown_count);
     TINT(text_skip_line_indent);
+    TINT(rest_max_total_sec);
     #undef TINT
 }
 
@@ -1949,6 +1980,7 @@ static cJSON *json_timing_obj(const action_timing_t *t)
     TADD(text_char_limit_min); TADD(text_char_limit_max);
     TADD(text_pre_pagedown_count);
     TADD(text_skip_line_indent);
+    TADD(rest_max_total_sec);
     #undef TADD
     return o;
 }
@@ -2199,6 +2231,48 @@ static esp_err_t handler_text_post(httpd_req_t *req)
         cJSON_AddStringToObject(ok, "msg", esp_err_to_name(err));
     }
     return send_json(req, ok, 200);
+}
+
+/* ---------------- /api/text/cursor：设置“写文本”的输出起始位置 ----------------
+ * 请求体 {"pos": N}：把续写游标设为文本的第 N 个字节（0=从头）。
+ * 对应页面「文本输入」下方的「起始文档位置」，与状态栏「文本位置」同源；
+ * **仅存内存、不持久化**（不写 NVS、不依赖 textdb），重启后恢复为 0。
+ */
+static esp_err_t handler_text_cursor_post(httpd_req_t *req)
+{
+    if (!require_auth(req)) return ESP_OK;
+    int len = req->content_len;
+    if (len <= 0 || len > 64) {
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddBoolToObject(e, "ok", false);
+        cJSON_AddStringToObject(e, "msg", "请求体应为 {\"pos\":N}（不超过 64 字节）");
+        return send_json(req, e, 400);
+    }
+    char buf[72];
+    if (!recv_full_body(req, buf, len)) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    long pos = 0;
+    cJSON *j = cJSON_Parse(buf);
+    if (j != NULL) {
+        cJSON *p = cJSON_GetObjectItem(j, "pos");
+        if (p != NULL && cJSON_IsNumber(p)) {
+            pos = (long)p->valuedouble;
+        }
+        cJSON_Delete(j);
+    }
+    if (pos < 0) {
+        pos = 0;
+    }
+    action_engine_set_text_cursor((size_t)pos);
+
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "ok", true);
+    cJSON_AddNumberToObject(o, "text_pos", (double)action_engine_text_cursor());
+    cJSON_AddNumberToObject(o, "text_len", (double)text_store_len());
+    return send_json(req, o, 200);
 }
 
 /* ---------------- /api/brand：品牌与导出文件名前缀（公开，无需登录） ----------------
@@ -2514,6 +2588,7 @@ esp_err_t web_server_start(void)
         { .uri = "/api/config",  .method = HTTP_POST, .handler = handler_config_post,.user_ctx = NULL },
         { .uri = "/api/text",    .method = HTTP_GET,  .handler = handler_text_get,   .user_ctx = NULL },
         { .uri = "/api/text",    .method = HTTP_POST, .handler = handler_text_post,  .user_ctx = NULL },
+        { .uri = "/api/text/cursor", .method = HTTP_POST, .handler = handler_text_cursor_post, .user_ctx = NULL },
         { .uri = "/api/control", .method = HTTP_POST, .handler = handler_control,    .user_ctx = NULL },
         { .uri = "/api/wifi",    .method = HTTP_POST, .handler = handler_wifi,       .user_ctx = NULL },
         { .uri = "/api/time",    .method = HTTP_GET,  .handler = handler_time,       .user_ctx = NULL },
