@@ -128,6 +128,7 @@ typedef struct {
     int drag_step_min, drag_step_max;           /* 每次分片步进（每帧位移量，≤127） */
     int drag_interval_min, drag_interval_max;
     int drag_end_delay_min, drag_end_delay_max;
+    int drag_home_before;                       /* 本动作执行前是否先做一次鼠标复位（1=是 0=否；默认 1） */
     /* 点击 */
     int click_repeat_min, click_repeat_max;
     int click_distance_min, click_distance_max; /* 单次移动到位移（逻辑像素） */
@@ -135,6 +136,7 @@ typedef struct {
     int click_hold_min, click_hold_max;
     int click_interval_min, click_interval_max;
     int click_end_delay_min, click_end_delay_max;
+    int click_home_before;                      /* 本动作执行前是否先做一次鼠标复位（1=是 0=否；默认 1） */
     /* 滚轮 */
     int wheel_repeat_min, wheel_repeat_max;
     int wheel_distance_min, wheel_distance_max; /* 滚轮前/后/横向预移动位移（逻辑像素） */
@@ -142,6 +144,7 @@ typedef struct {
     int wheel_tick_min, wheel_tick_max;
     int wheel_interval_min, wheel_interval_max;
     int wheel_end_delay_min, wheel_end_delay_max;
+    int wheel_home_before;                      /* 本动作执行前是否先做一次鼠标复位（1=是 0=否；默认 1） */
     /* 方向键 */
     int arrow_repeat_min, arrow_repeat_max;
     int arrow_interval_min, arrow_interval_max;
@@ -154,6 +157,7 @@ typedef struct {
     int move_step_min, move_step_max;           /* 每次分片步进（每帧位移量，≤127） */
     int move_interval_min, move_interval_max;
     int move_end_delay_min, move_end_delay_max;
+    int move_home_before;                       /* 本动作执行前是否先做一次鼠标复位（1=是 0=否；默认 1） */
     /* 状态 LED 闪烁时间 */
     int led_blink_on_ms;
     int led_freq_per_1min_ms;
@@ -237,9 +241,11 @@ typedef struct {
  *        开启后回车之后的行首空格/制表符不发送，规避 VSCode 等编辑器自动缩进造成的重复缩进。
  *   17 —— 新增 timing.rest_max_total_sec（默认 540 秒=9 分钟）：连续休息累计上限，
  *        超过后强制改执行非休息动作，避免长时间休息；仅执行非休息动作时才清零计时。
+ *   18 —— 新增 drag/click/wheel/move_home_before（默认 1）：四个“移动鼠标”类动作各自
+ *        控制“本动作执行前是否先做一次鼠标复位”，动作内部循环/分片不做复位。
  * 约定：旧配置与新布局不兼容时统一重置为默认（会清空 WiFi 凭据等，需重新在页面配置）。
  */
-#define CFG_VERSION  17
+#define CFG_VERSION  18
 typedef struct {
     uint32_t        version;            /* 结构版本，便于后续扩展兼容 */
     uint8_t         active_profile;     /* 当前生效的参数套序号 0~(PROFILE_COUNT-1)（选择即生效，其余套只保存不生效） */

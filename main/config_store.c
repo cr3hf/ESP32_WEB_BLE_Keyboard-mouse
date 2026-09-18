@@ -61,6 +61,7 @@ static void cfg_default_timing(action_timing_t *t)
     t->drag_step_min = 10;    t->drag_step_max = 30;            /* 每次分片步进（每帧位移量） */
     t->drag_interval_min = 600; t->drag_interval_max = 1500;
     t->drag_end_delay_min = 500; t->drag_end_delay_max = 5000;
+    t->drag_home_before = 1;   /* 拖拽前先复位鼠标（默认勾选） */
     /* 点击: 移动距离 + 分片步进 + 次数 + 按住 + 间隔 + 结束延迟 */
     t->click_repeat_min = 1;  t->click_repeat_max = 10;
     t->click_distance_min = 10; t->click_distance_max = 100;   /* 点击前移动到位移（逻辑像素） */
@@ -68,6 +69,7 @@ static void cfg_default_timing(action_timing_t *t)
     t->click_hold_min = 20;   t->click_hold_max = 250;
     t->click_interval_min = 100; t->click_interval_max = 1000;
     t->click_end_delay_min = 1000; t->click_end_delay_max = 5000;
+    t->click_home_before = 1;  /* 点击前先复位鼠标（默认勾选） */
     /* 滚轮: 预移动距离 + 分片步进 + 次数 + 格数 + 间隔 + 结束延迟 */
     t->wheel_repeat_min = 1;  t->wheel_repeat_max = 5;
     t->wheel_distance_min = 10; t->wheel_distance_max = 100;    /* 滚轮前预移动位移（逻辑像素） */
@@ -75,6 +77,7 @@ static void cfg_default_timing(action_timing_t *t)
     t->wheel_tick_min = 1;    t->wheel_tick_max = 8;
     t->wheel_interval_min = 100; t->wheel_interval_max = 500;
     t->wheel_end_delay_min = 1000; t->wheel_end_delay_max = 5000;
+    t->wheel_home_before = 1;  /* 滚轮前先复位鼠标（默认勾选） */
     /* 方向键: ARROW_REPEAT_* / ARROW_INTERVAL_* / ARROW_END_DELAY_* */
     t->arrow_repeat_min = 1;  t->arrow_repeat_max = 20;
     t->arrow_interval_min = 50; t->arrow_interval_max = 800;
@@ -88,6 +91,7 @@ static void cfg_default_timing(action_timing_t *t)
     t->move_step_min = 1;     t->move_step_max = 15;            /* 每次分片步进（每帧位移量） */
     t->move_interval_min = 100; t->move_interval_max = 500;
     t->move_end_delay_min = 500; t->move_end_delay_max = 1000;
+    t->move_home_before = 1;   /* 滑动前先复位鼠标（默认勾选） */
     /* LED: LED_BLINK_ON_MS / LED_FREQ_PER_1MIN_MS / LED_FREQ_MAX_MS / LED_BLINK_ONCE_MS / LED_BLINK_ONCE_GAP_MS */
     t->led_blink_on_ms = 80;
     t->led_freq_per_1min_ms = 50;

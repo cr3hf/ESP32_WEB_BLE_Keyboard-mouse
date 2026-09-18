@@ -536,7 +536,7 @@ static void act_drag(void)
 
     /* 松开左键 */
     mouse_button(0);
-    /* 注：动作结束时不再复位鼠标（复位仅在“滑动鼠标”动作开始前执行一次） */
+    /* 注：动作结束时不复位；本动作“执行前复位”由主循环按 *_home_before 决定，动作内循环不复位 */
     /* 动作自带随机延迟 */
     action_delay_ms(rand_range(T->drag_end_delay_min, T->drag_end_delay_max));
 
@@ -572,7 +572,7 @@ static void act_click(void)
         }
     }
 
-    /* 注：动作结束时不再复位鼠标（复位仅在“滑动鼠标”动作开始前执行一次） */
+    /* 注：动作结束时不复位；本动作“执行前复位”由主循环按 *_home_before 决定，动作内循环不复位 */
     action_delay_ms(rand_range(T->click_end_delay_min, T->click_end_delay_max));
 
 exit_release:
@@ -614,7 +614,7 @@ static void act_wheel(void)
         mouse_wheel(-wheel_sum);
     }
 
-    /* 注：动作结束时不再复位鼠标（复位仅在“滑动鼠标”动作开始前执行一次） */
+    /* 注：动作结束时不复位；本动作“执行前复位”由主循环按 *_home_before 决定，动作内循环不复位 */
     action_delay_ms(rand_range(T->wheel_end_delay_min, T->wheel_end_delay_max));
 
 exit_release:
@@ -1052,7 +1052,7 @@ static void act_move(void)
         }
     }
 
-    /* 注：动作结束时不再复位鼠标；本动作(滑动鼠标)的复位在其开始前由主循环执行 */
+    /* 注：动作结束时不复位；本动作“执行前复位”由主循环按 move_home_before 决定，动作内循环不复位 */
     action_delay_ms(rand_range(T->move_end_delay_min, T->move_end_delay_max));
 
 exit_release:
@@ -1144,6 +1144,21 @@ static action_id_t apply_rest_cap(action_id_t act)
     return forced;
 }
 
+/* 判断某动作在执行前是否需要先做一次鼠标复位。
+ * 仅四个“移动鼠标”类动作（拖拽/点击/滚轮/滑动）带此开关（各自动作参数，默认 1=勾选）。
+ * 复位只在“本动作开始前”执行一次；动作内部的循环/分片不再复位。 */
+static bool action_needs_home(action_id_t act)
+{
+    const action_timing_t *T = ae_timing();
+    switch (act) {
+    case ACT_DRAG:  return (T->drag_home_before  != 0);
+    case ACT_CLICK: return (T->click_home_before != 0);
+    case ACT_WHEEL: return (T->wheel_home_before != 0);
+    case ACT_MOVE:  return (T->move_home_before  != 0);
+    default:        return false;   /* 非鼠标类动作：不涉及鼠标复位 */
+    }
+}
+
 /* 按 action_id 执行对应动作原语（序列模式 / 单动作 / 周期复用） */
 static void exec_action_by_id(uint8_t action_id)
 {
@@ -1225,7 +1240,7 @@ void action_engine_trigger_sequence_once(void)
         }
         uint8_t a = seq_action_at(i);
         a = (uint8_t)apply_rest_cap((action_id_t)a);   /* 连续休息超限则强制改动作 */
-        if (a == ACT_MOVE && !action_mouse_home()) {
+        if (action_needs_home((action_id_t)a) && !action_mouse_home()) {
             break;   /* 复位被中断：结束本轮 */
         }
         exec_action_by_id(a);
@@ -1241,8 +1256,8 @@ void action_engine_run_single(uint8_t action_id)
     }
     ESP_LOGI(TAG, "[定时单动作] 执行 action_id=%d", action_id);
     action_id = (uint8_t)apply_rest_cap((action_id_t)action_id);   /* 连续休息超限则改为非休息动作 */
-    if (action_id == ACT_MOVE && !action_mouse_home()) {
-        ESP_LOGW(TAG, "复位被中断，跳过本次滑动鼠标");
+    if (action_needs_home((action_id_t)action_id) && !action_mouse_home()) {
+        ESP_LOGW(TAG, "复位被中断，跳过本次动作 action=%d", action_id);
         return;
     }
     exec_action_by_id(action_id);
@@ -1290,14 +1305,15 @@ static void action_engine_task(void *arg)
         }
 
         /* 抽取并执行一个动作（按运行模式分支）。
-         * 复位规则：仅“滑动鼠标(ACT_MOVE)”动作开始前执行一次鼠标复位，
-         * 其余动作（含休息）均不做鼠标复位。 */
+         * 复位规则：四个“移动鼠标”动作（拖拽/点击/滚轮/滑动）各自按
+         * drag/click/wheel/move_home_before 开关（默认 1=勾选）在“本动作开始前”复位一次；
+         * 动作内部的循环/分片不复位。其余动作（方向键/休息/打字/切换程序/写文本）不涉及复位。 */
         if (s_run_mode == RUN_MODE_SEQUENCE) {
             uint8_t n = (s_sequence.count > ACT_SEQ_MAX) ? ACT_SEQ_MAX : s_sequence.count;
             if (n == 0) {
                 /* 序列为空：退化为休息，避免空转；连续休息超限则强制改执行非休息动作 */
                 action_id_t a0 = apply_rest_cap(ACT_REST);
-                if (a0 == ACT_MOVE && !action_mouse_home()) {
+                if (action_needs_home(a0) && !action_mouse_home()) {
                     action_release_all();
                     continue;
                 }
@@ -1305,7 +1321,7 @@ static void action_engine_task(void *arg)
             } else {
                 uint8_t act = seq_action_at(s_seq_cursor);
                 act = (uint8_t)apply_rest_cap((action_id_t)act);   /* 连续休息超限则强制改动作 */
-                if (act == ACT_MOVE && !action_mouse_home()) {
+                if (action_needs_home((action_id_t)act) && !action_mouse_home()) {
                     action_release_all();
                     continue;   /* 被中断：不推进游标，下轮重试 */
                 }
@@ -1331,7 +1347,7 @@ static void action_engine_task(void *arg)
         } else {
             action_id_t act = pick_action();
             act = apply_rest_cap(act);   /* 连续休息超限则强制改抽非休息动作 */
-            if (act == ACT_MOVE && !action_mouse_home()) {
+            if (action_needs_home(act) && !action_mouse_home()) {
                 action_release_all();
                 continue;
             }

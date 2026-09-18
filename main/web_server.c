@@ -271,6 +271,7 @@ static const char PAGE_HTML[] =
 ".trow .sep{color:var(--sub);width:14px;text-align:center}\n"
 ".trow select{width:100%;padding:6px 7px;border-radius:8px;border:1px solid rgba(148,163,184,.2);background:rgba(2,8,23,.5);color:var(--text);font-size:12.5px;outline:none}\n"
 ".trow .u{color:var(--sub);width:26px;text-align:right;font-size:11px}\n"
+".trow input[type=checkbox]{width:17px!important;height:17px;padding:0;accent-color:#22d3ee;cursor:pointer}\n"
 ".trow .min input.bad,.trow .max input.bad{border-color:#ef4444!important;background:rgba(239,68,68,.15)!important;color:#fecaca!important}\n"
 ".switch{position:relative;width:42px;height:24px;display:inline-block;cursor:pointer}\n"
 ".switch input{opacity:0;width:0;height:0}\n"
@@ -675,13 +676,13 @@ static const char PAGE_HTML[] =
 "  document.getElementById('ble-power').value=String(cfg.radio.ble_power_level);\n"
 "  document.getElementById('word-list').value=(cfg.word_list||'');\n"
 "}\n"
-"function defaultTiming(){return {drag_repeat_min:1,drag_repeat_max:5,drag_distance_min:20,drag_distance_max:100,drag_step_min:10,drag_step_max:30,drag_interval_min:600,drag_interval_max:1500,drag_end_delay_min:500,drag_end_delay_max:5000,\n"
-"  click_repeat_min:1,click_repeat_max:10,click_distance_min:10,click_distance_max:100,click_step_min:1,click_step_max:30,click_hold_min:20,click_hold_max:250,click_interval_min:100,click_interval_max:1000,click_end_delay_min:1000,click_end_delay_max:5000,\n"
-"  wheel_repeat_min:1,wheel_repeat_max:5,wheel_distance_min:10,wheel_distance_max:100,wheel_step_min:1,wheel_step_max:30,wheel_tick_min:1,wheel_tick_max:8,wheel_interval_min:100,wheel_interval_max:500,wheel_end_delay_min:1000,wheel_end_delay_max:5000,\n"
+"function defaultTiming(){return {drag_repeat_min:1,drag_repeat_max:5,drag_distance_min:20,drag_distance_max:100,drag_step_min:10,drag_step_max:30,drag_interval_min:600,drag_interval_max:1500,drag_end_delay_min:500,drag_end_delay_max:5000,drag_home_before:1,\n"
+"  click_repeat_min:1,click_repeat_max:10,click_distance_min:10,click_distance_max:100,click_step_min:1,click_step_max:30,click_hold_min:20,click_hold_max:250,click_interval_min:100,click_interval_max:1000,click_end_delay_min:1000,click_end_delay_max:5000,click_home_before:1,\n"
+"  wheel_repeat_min:1,wheel_repeat_max:5,wheel_distance_min:10,wheel_distance_max:100,wheel_step_min:1,wheel_step_max:30,wheel_tick_min:1,wheel_tick_max:8,wheel_interval_min:100,wheel_interval_max:500,wheel_end_delay_min:1000,wheel_end_delay_max:5000,wheel_home_before:1,\n"
 "  arrow_repeat_min:1,arrow_repeat_max:20,arrow_interval_min:50,arrow_interval_max:800,arrow_end_delay_min:1000,arrow_end_delay_max:5000,\n"
 "  rest_delay_min:10,rest_delay_max:200,rest_max_total_sec:540,\n"
 "  move_repeat_min:1,move_repeat_max:20,move_distance_min:10,move_distance_max:30,move_step_min:1,move_step_max:15,\n"
-"  move_interval_min:100,move_interval_max:500,move_end_delay_min:500,move_end_delay_max:1000,\n"
+"  move_interval_min:100,move_interval_max:500,move_end_delay_min:500,move_end_delay_max:1000,move_home_before:1,\n"
 "  led_blink_on_ms:80,led_freq_per_1min_ms:50,led_freq_max_ms:2000,led_blink_once_ms:200,led_blink_once_gap_ms:200,\n"
 "  word_repeat_min:1,word_repeat_max:5,word_char_delay_min:40,word_char_delay_max:700,word_space_delay_min:40,word_space_delay_max:1000,word_interval_min:500,word_interval_max:2000,word_end_delay_min:500,word_end_delay_max:1200,\n"
 "  alt_tab_repeat_min:0,alt_tab_repeat_max:1,alt_tab_interval_min:500,alt_tab_interval_max:1000,alt_tab_end_delay_min:700,alt_tab_end_delay_max:1500,\n"
@@ -1060,21 +1061,24 @@ static const char PAGE_HTML[] =
 "    ['移动距离(像素)','drag_distance_min','drag_distance_max',10,2000],\n"
 "    ['中间步进(像素/帧)','drag_step_min','drag_step_max',1,127],\n"
 "    ['动作间隔','drag_interval_min','drag_interval_max',50,5000],\n"
-"    ['结束延迟','drag_end_delay_min','drag_end_delay_max',50,60000]]},\n"
+"    ['结束延迟','drag_end_delay_min','drag_end_delay_max',50,60000],\n"
+"    ['执行前先复位鼠标','drag_home_before',null,0,1,'bool']]},\n"
 "  {title:'点击',unit:'ms',rows:[\n"
 "    ['重复次数(次)','click_repeat_min','click_repeat_max',1,999],\n"
 "    ['移动距离(像素)','click_distance_min','click_distance_max',10,2000],\n"
 "    ['中间步进(像素/帧)','click_step_min','click_step_max',1,127],\n"
 "    ['按住时长','click_hold_min','click_hold_max',5,1000],\n"
 "    ['动作间隔','click_interval_min','click_interval_max',50,5000],\n"
-"    ['结束延迟','click_end_delay_min','click_end_delay_max',50,60000]]},\n"
+"    ['结束延迟','click_end_delay_min','click_end_delay_max',50,60000],\n"
+"    ['执行前先复位鼠标','click_home_before',null,0,1,'bool']]},\n"
 "  {title:'滚轮',unit:'ms',rows:[\n"
 "    ['重复次数(次)','wheel_repeat_min','wheel_repeat_max',1,999],\n"
 "    ['移动距离(像素)','wheel_distance_min','wheel_distance_max',10,2000],\n"
 "    ['中间步进(像素/帧)','wheel_step_min','wheel_step_max',1,127],\n"
 "    ['单次格数','wheel_tick_min','wheel_tick_max',1,30],\n"
 "    ['动作间隔','wheel_interval_min','wheel_interval_max',50,5000],\n"
-"    ['结束延迟','wheel_end_delay_min','wheel_end_delay_max',50,60000]]},\n"
+"    ['结束延迟','wheel_end_delay_min','wheel_end_delay_max',50,60000],\n"
+"    ['执行前先复位鼠标','wheel_home_before',null,0,1,'bool']]},\n"
 "  {title:'方向键',unit:'ms',rows:[\n"
 "    ['重复次数(次)','arrow_repeat_min','arrow_repeat_max',1,999],\n"
 "    ['动作间隔','arrow_interval_min','arrow_interval_max',50,5000],\n"
@@ -1087,7 +1091,8 @@ static const char PAGE_HTML[] =
 "    ['移动距离(像素)','move_distance_min','move_distance_max',10,2000],\n"
 "    ['中间步进(像素/帧)','move_step_min','move_step_max',1,127],\n"
 "    ['动作间隔','move_interval_min','move_interval_max',50,5000],\n"
-"    ['结束延迟','move_end_delay_min','move_end_delay_max',50,60000]]},\n"
+"    ['结束延迟','move_end_delay_min','move_end_delay_max',50,60000],\n"
+"    ['执行前先复位鼠标','move_home_before',null,0,1,'bool']]},\n"
 "  {title:'打字(单词)',unit:'ms',rows:[\n"
 "    ['每次打字词数(个)','word_repeat_min','word_repeat_max',1,999],\n"
 "    ['字符间隔','word_char_delay_min','word_char_delay_max',5,1000],\n"
@@ -1119,15 +1124,23 @@ static const char PAGE_HTML[] =
 "    const card=document.createElement('div');card.className='tcard';\n"
 "    card.innerHTML='<div class=tch>'+g.title+'</div>';\n"
 "    g.rows.forEach(r=>{\n"
-"      const [label,minK,maxK,lo,hi]=r;const unit=g.unit;\n"
+"      const [label,minK,maxK,lo,hi,kind]=r;const unit=g.unit;\n"
 "      const row=document.createElement('div');row.className='trow';\n"
 "      let h='<label>'+label+'</label>';\n"
-"      h+='<span class=min><input type=number min='+lo+' max='+hi+' value='+(cfg.timing[minK]||0)+' data-k='+minK+' data-lo='+lo+' data-hi='+hi+'></span>';\n"
-"      if(maxK){h+='<span class=sep>~</span><span class=max><input type=number min='+lo+' max='+hi+' value='+(cfg.timing[maxK]||0)+' data-k='+maxK+' data-lo='+lo+' data-hi='+hi+'></span>';}\n"
-"      else{h+='<span class=sep></span><span class=max></span>';}\n"
+"      if(kind==='bool'){\n"
+"        h+='<span class=min><input type=checkbox data-k='+minK+' data-bool=1 '+((+cfg.timing[minK]||0)?'checked':'')+'></span>';\n"
+"        h+='<span class=sep></span><span class=max></span>';\n"
+"      }else{\n"
+"        h+='<span class=min><input type=number min='+lo+' max='+hi+' value='+(cfg.timing[minK]||0)+' data-k='+minK+' data-lo='+lo+' data-hi='+hi+'></span>';\n"
+"        if(maxK){h+='<span class=sep>~</span><span class=max><input type=number min='+lo+' max='+hi+' value='+(cfg.timing[maxK]||0)+' data-k='+maxK+' data-lo='+lo+' data-hi='+hi+'></span>';}\n"
+"        else{h+='<span class=sep></span><span class=max></span>';}\n"
+"      }\n"
 "      h+='<span class=u>'+unit+'</span>';\n"
 "      row.innerHTML=h;\n"
-"      row.querySelectorAll('input').forEach(inp=>{inp.addEventListener('input',()=>{cfg.timing[inp.dataset.k]=+inp.value;scheduleSave();markTimingInput(inp);});});\n"
+"      row.querySelectorAll('input').forEach(inp=>{\n"
+"        if(inp.dataset.bool){inp.addEventListener('change',()=>{cfg.timing[inp.dataset.k]=inp.checked?1:0;scheduleSave();});}\n"
+"        else{inp.addEventListener('input',()=>{cfg.timing[inp.dataset.k]=+inp.value;scheduleSave();markTimingInput(inp);});}\n"
+"      });\n"
 "      card.appendChild(row);\n"
 "    });\n"
 "    wrap.appendChild(card);\n"
@@ -1681,18 +1694,21 @@ static void json_parse_timing(cJSON *tm, action_timing_t *t)
     TINT(drag_step_min);     TINT(drag_step_max);
     TINT(drag_interval_min); TINT(drag_interval_max);
     TINT(drag_end_delay_min);TINT(drag_end_delay_max);
+    TINT(drag_home_before);
     TINT(click_repeat_min);  TINT(click_repeat_max);
     TINT(click_distance_min);TINT(click_distance_max);
     TINT(click_step_min);    TINT(click_step_max);
     TINT(click_hold_min);    TINT(click_hold_max);
     TINT(click_interval_min);TINT(click_interval_max);
     TINT(click_end_delay_min);TINT(click_end_delay_max);
+    TINT(click_home_before);
     TINT(wheel_repeat_min);  TINT(wheel_repeat_max);
     TINT(wheel_distance_min);TINT(wheel_distance_max);
     TINT(wheel_step_min);    TINT(wheel_step_max);
     TINT(wheel_tick_min);    TINT(wheel_tick_max);
     TINT(wheel_interval_min);TINT(wheel_interval_max);
     TINT(wheel_end_delay_min);TINT(wheel_end_delay_max);
+    TINT(wheel_home_before);
     TINT(arrow_repeat_min);  TINT(arrow_repeat_max);
     TINT(arrow_interval_min);TINT(arrow_interval_max);
     TINT(arrow_end_delay_min);TINT(arrow_end_delay_max);
@@ -1702,6 +1718,7 @@ static void json_parse_timing(cJSON *tm, action_timing_t *t)
     TINT(move_step_min);      TINT(move_step_max);
     TINT(move_interval_min);  TINT(move_interval_max);
     TINT(move_end_delay_min); TINT(move_end_delay_max);
+    TINT(move_home_before);
     TINT(led_blink_on_ms);
     TINT(led_freq_per_1min_ms);
     TINT(led_freq_max_ms);
@@ -1940,18 +1957,21 @@ static cJSON *json_timing_obj(const action_timing_t *t)
     TADD(drag_step_min);     TADD(drag_step_max);
     TADD(drag_interval_min); TADD(drag_interval_max);
     TADD(drag_end_delay_min);TADD(drag_end_delay_max);
+    TADD(drag_home_before);
     TADD(click_repeat_min);  TADD(click_repeat_max);
     TADD(click_distance_min);TADD(click_distance_max);
     TADD(click_step_min);    TADD(click_step_max);
     TADD(click_hold_min);    TADD(click_hold_max);
     TADD(click_interval_min);TADD(click_interval_max);
     TADD(click_end_delay_min);TADD(click_end_delay_max);
+    TADD(click_home_before);
     TADD(wheel_repeat_min);  TADD(wheel_repeat_max);
     TADD(wheel_distance_min);TADD(wheel_distance_max);
     TADD(wheel_step_min);    TADD(wheel_step_max);
     TADD(wheel_tick_min);    TADD(wheel_tick_max);
     TADD(wheel_interval_min);TADD(wheel_interval_max);
     TADD(wheel_end_delay_min);TADD(wheel_end_delay_max);
+    TADD(wheel_home_before);
     TADD(arrow_repeat_min);  TADD(arrow_repeat_max);
     TADD(arrow_interval_min);TADD(arrow_interval_max);
     TADD(arrow_end_delay_min);TADD(arrow_end_delay_max);
@@ -1961,6 +1981,7 @@ static cJSON *json_timing_obj(const action_timing_t *t)
     TADD(move_step_min);      TADD(move_step_max);
     TADD(move_interval_min);  TADD(move_interval_max);
     TADD(move_end_delay_min); TADD(move_end_delay_max);
+    TADD(move_home_before);
     TADD(led_blink_on_ms);
     TADD(led_freq_per_1min_ms);
     TADD(led_freq_max_ms);
